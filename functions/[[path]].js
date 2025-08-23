@@ -1203,7 +1203,13 @@ async function handleMisubRequest(context) {
 
     if (isProfileExpired) { // Use the flag set earlier
         prependedContentForSubconverter = ''; // Expired node is now in targetMisubs
-    } else if (config.showTrafficRemainingNode) {
+    } else if (((() => {
+        if (profileIdentifier) {
+            const pf = allProfiles.find(p => (p.customId && p.customId === profileIdentifier) || p.id === profileIdentifier);
+            if (pf && pf.showTrafficRemainingNode === false) return false;
+        }
+        return config.showTrafficRemainingNode !== false;
+    })())) {
         // Otherwise, add traffic remaining info if applicable
         const totalRemainingBytes = targetMisubs.reduce((acc, sub) => {
             if (sub.enabled && sub.userInfo && sub.userInfo.total > 0) {
