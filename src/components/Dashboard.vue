@@ -120,10 +120,25 @@ const handleDiscard = () => {
 };
 const handleSave = async () => {
   saveState.value = 'saving';
-  const combinedMisubs = [
-      ...subscriptions.value.map(sub => ({ ...sub, isUpdating: undefined })),
-      ...manualNodes.value.map(node => ({ ...node, isUpdating: undefined }))
-  ];
+  // 组合保存顺序：优先使用统一排序的顺序，其次使用全局默认（手动在前/后）
+  const subMap = new Map(subscriptions.value.map(s => [s.id, { ...s, isUpdating: undefined }]));
+  const nodeMap = new Map(manualNodes.value.map(n => [n.id, { ...n, isUpdating: undefined }]));
+  let combinedMisubs = [];
+  if (unifiedOrderIds.value && unifiedOrderIds.value.length) {
+    unifiedOrderIds.value.forEach(id => {
+      if (subMap.has(id)) combinedMisubs.push(subMap.get(id));
+      else if (nodeMap.has(id)) combinedMisubs.push(nodeMap.get(id));
+    });
+    // 追加遗漏项（新建等）
+    subMap.forEach((v, id) => { if (!unifiedOrderIds.value.includes(id)) combinedMisubs.push(v); });
+    nodeMap.forEach((v, id) => { if (!unifiedOrderIds.value.includes(id)) combinedMisubs.push(v); });
+  } else {
+    const subsArr = Array.from(subMap.values());
+    const nodesArr = Array.from(nodeMap.values());
+    combinedMisubs = (config.value.manualNodesPosition === 'after')
+      ? [...subsArr, ...nodesArr]
+      : [...nodesArr, ...subsArr];
+  }
 
   try {
     // 数据验证

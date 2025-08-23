@@ -970,7 +970,7 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                                     try {
                                         const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
                                         if (nameRegex.test(nodeName)) return true;
-                                    } catch (e) {}
+                                    } catch (e) { }
                                 }
                             }
                             return false;
@@ -995,7 +995,7 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                                     try {
                                         const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
                                         if (nameRegex.test(nodeName)) return false;
-                                    } catch (e) {}
+                                    } catch (e) { }
                                 }
                             }
                             return true;
