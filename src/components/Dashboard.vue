@@ -265,7 +265,7 @@ const handleBulkImport = (importText) => {
 };
 const handleAddSubscription = () => {
   isNewSubscription.value = true;
-  editingSubscription.value = { name: '', url: '', enabled: true, exclude: '', refreshOnAccess: undefined }; // 新增 exclude 与 refreshOnAccess 覆盖
+  editingSubscription.value = { name: '', url: '', enabled: true, exclude: '', refreshOnAccess: true }; // 默认启用访问时刷新
   showSubModal.value = true;
 };
 const handleEditSubscription = (subId) => {

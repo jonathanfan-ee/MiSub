@@ -18,6 +18,8 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       isUpdating: false,
       userInfo: sub.userInfo || null,
       exclude: sub.exclude || '', // 新增 exclude 属性
+      // 默认按订阅启用访问时刷新；仅当明确为 false 时关闭
+      refreshOnAccess: sub.refreshOnAccess !== false,
     }));
     // [最終修正] 移除此處的自動更新迴圈，以防止本地開發伺服器因併發請求過多而崩潰。
     // subscriptions.value.forEach(sub => handleUpdateNodeCount(sub.id, true)); 
