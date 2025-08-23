@@ -170,7 +170,9 @@ const defaultSettings = {
     prependSubName: true,
     NotifyThresholdDays: 3,
     NotifyThresholdPercent: 90,
-    storageType: 'kv' // 新增：数据存储类型，默认 KV，可选 'd1'
+    storageType: 'kv', // 新增：数据存储类型，默认 KV，可选 'd1'
+    showTrafficRemainingNode: true, // 是否在聚合顶部插入“流量剩余”虚拟节点
+    manualNodesPosition: 'before' // 手动节点相对机场订阅的位置：before / after
 };
 
 const formatBytes = (bytes, decimals = 2) => {
@@ -194,7 +196,7 @@ function decodeMaybeBase64ToUtf8(input) {
             for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
             return new TextDecoder('utf-8').decode(bytes);
         }
-    } catch {}
+    } catch { }
     return input;
 }
 
@@ -898,7 +900,8 @@ function prependNodeName(link, prefix) {
 // --- 节点列表生成函数 ---
 async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '', debugCollector = null) {
     const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//;
-    const processedManualNodes = misubs.filter(sub => !sub.url.toLowerCase().startsWith('http')).map(node => {
+    const manualNodes = misubs.filter(sub => !sub.url.toLowerCase().startsWith('http'));
+    const processedManualNodes = manualNodes.map(node => {
         if (node.isExpiredNode) {
             return node.url; // Directly use the URL for expired node
         } else {
@@ -1044,7 +1047,12 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
         } catch (e) { return ''; }
     });
     const processedSubContents = await Promise.all(subPromises);
-    const combinedContent = (processedManualNodes + '\n' + processedSubContents.join('\n'));
+    let combinedContent = '';
+    if (config.manualNodesPosition === 'after') {
+        combinedContent = (processedSubContents.join('\n') + '\n' + processedManualNodes);
+    } else { // default before
+        combinedContent = (processedManualNodes + '\n' + processedSubContents.join('\n'));
+    }
     const uniqueNodesString = [...new Set(combinedContent.split('\n').map(line => line.trim()).filter(line => line))].join('\n');
 
     // 确保最终的字符串在非空时以换行符结束，以兼容 subconverter
@@ -1226,7 +1234,7 @@ async function handleMisubRequest(context) {
 
     if (isProfileExpired) { // Use the flag set earlier
         prependedContentForSubconverter = ''; // Expired node is now in targetMisubs
-    } else {
+    } else if (config.showTrafficRemainingNode) {
         // Otherwise, add traffic remaining info if applicable
         const totalRemainingBytes = targetMisubs.reduce((acc, sub) => {
             if (sub.enabled && sub.userInfo && sub.userInfo.total > 0) {
