@@ -121,16 +121,21 @@ const expiryInfo = computed(() => {
     </div>
 
     <div class="flex justify-between items-center mt-3">
-        <div class="flex items-center gap-3">
-          <label class="relative inline-flex items-center cursor-pointer" title="启用/禁用此订阅">
-            <input type="checkbox" v-model="misub.enabled" @change="emit('change')" class="sr-only peer">
-            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-500 peer-checked:bg-indigo-600 dark:peer-checked:bg-green-600"></div>
-          </label>
-          <label class="relative inline-flex items-center cursor-pointer" title="聚合访问时是否实时拉取上游">
-            <input type="checkbox" v-model="misub.realtimeFetch" @change="emit('change')" class="sr-only peer">
-            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-500 peer-checked:bg-indigo-600 dark:peer-checked:bg-green-600"></div>
-          </label>
-          <span class="text-xs text-gray-500 dark:text-gray-400">{{ misub.realtimeFetch ? '实时' : '缓存' }}</span>
+        <div class="flex items-center gap-4">
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-gray-500 dark:text-gray-400">启用</span>
+            <label class="relative inline-flex items-center cursor-pointer" title="启用/禁用此订阅">
+              <input type="checkbox" v-model="misub.enabled" @change="emit('change')" class="sr-only peer">
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-500 peer-checked:bg-indigo-600 dark:peer-checked:bg-green-600"></div>
+            </label>
+          </div>
+          <div v-if="protocol === 'http' || protocol === 'https'" class="flex items-center gap-2">
+            <span class="text-xs text-gray-500 dark:text-gray-400">实时</span>
+            <label class="relative inline-flex items-center cursor-pointer" title="聚合访问时是否实时拉取上游">
+              <input type="checkbox" v-model="misub.realtimeFetch" @change="emit('change')" class="sr-only peer">
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-500 peer-checked:bg-indigo-600 dark:peer-checked:bg-green-600"></div>
+            </label>
+          </div>
           <span v-if="expiryInfo" class="text-xs font-medium" :class="expiryInfo.style">{{ expiryInfo.daysRemaining }}</span>
         </div>
       <div class="flex items-center space-x-3">
