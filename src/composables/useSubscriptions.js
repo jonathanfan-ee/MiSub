@@ -91,7 +91,11 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     if (index !== -1) {
       if (subscriptions.value[index].url !== updatedSub.url) {
         updatedSub.nodeCount = 0;
-        handleUpdateNodeCount(updatedSub.id); // URL 變更時自動更新單個
+        // URL 變更時是否自动更新：尊重每订阅的 refreshOnAccess（默认开启）
+        const shouldAutoRefresh = updatedSub.refreshOnAccess !== false;
+        if (shouldAutoRefresh) {
+          handleUpdateNodeCount(updatedSub.id);
+        }
       }
       subscriptions.value[index] = updatedSub;
       markDirty();
