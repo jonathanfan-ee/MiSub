@@ -220,6 +220,7 @@ watch(() => props.show, (newValue) => {
               <span class="text-sm text-gray-600 dark:text-gray-300">手动节点在后</span>
             </label>
           </div>
+          <p class="text-xs text-gray-400 mt-1">说明：此为默认顺序。若你使用“统一排序”并保存，统一排序的结果将覆盖此默认顺序；再次调整任一项并保存，即以最后保存的为准。</p>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">数据存储类型</label>
