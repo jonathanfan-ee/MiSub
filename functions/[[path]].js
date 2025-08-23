@@ -924,6 +924,13 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             let validNodes = text.replace(/\r\n/g, '\n').split('\n')
                 .map(line => line.trim()).filter(line => nodeRegex.test(line));
 
+            // 若實時請求成功但內容不是節點（例如返回 200 的過期提示頁），回退到緩存
+            if (validNodes.length === 0 && sub.cachedRaw && sub.cachedRaw.length > 0) {
+                const cachedText = sub.cachedRaw;
+                validNodes = cachedText.replace(/\r\n/g, '\n').split('\n')
+                    .map(line => line.trim()).filter(line => nodeRegex.test(line));
+            }
+
             // [核心重構] 引入白名單 (keep:) 和黑名單 (exclude) 模式
             if (sub.exclude && sub.exclude.trim() !== '') {
                 const rules = sub.exclude.trim().split('\n').map(r => r.trim()).filter(Boolean);
