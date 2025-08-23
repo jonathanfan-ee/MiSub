@@ -640,6 +640,7 @@ async function handleApiRequest(request, env) {
                     let decoded = '';
                     try { decoded = atob(text.replace(/\s/g, '')); } catch { decoded = text; }
                     decodedText = decoded;
+                    result.cachedRaw = decodedText;
                     const lineMatches = decoded.match(/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls):\/\//gm);
                     if (lineMatches) {
                         result.count = lineMatches.length;
@@ -652,6 +653,7 @@ async function handleApiRequest(request, env) {
                     // 將節點數視為 0，並清空緩存文本
                     result.count = 0;
                     decodedText = '';
+                    result.cachedRaw = '';
                 }
 
                 // 始終更新：即使節點數為 0 或請求失敗，也更新 nodeCount 與緩存
