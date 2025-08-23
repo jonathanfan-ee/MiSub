@@ -897,162 +897,131 @@ function prependNodeName(link, prefix) {
     return appendToFragment(link, prefix);
 }
 
-// --- 节点列表生成函数 ---
+// --- 节点列表生成函数（保留前端保存的顺序） ---
 async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '', debugCollector = null) {
     const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//;
-    const manualNodes = misubs.filter(sub => !sub.url.toLowerCase().startsWith('http'));
-    const processedManualNodes = manualNodes.map(node => {
-        if (node.isExpiredNode) {
-            return node.url; // Directly use the URL for expired node
-        } else {
-            return (config.prependSubName) ? prependNodeName(node.url, '手动节点') : node.url;
-        }
-    }).join('\n');
 
-    const httpSubs = misubs.filter(sub => sub.url.toLowerCase().startsWith('http'));
-    const subPromises = httpSubs.map(async (sub) => {
-        try {
-            let text = '';
-            let usedSource = 'cache';
-            // 默认开启实时拉取；当 sub.realtimeFetch === false 时改为使用缓存
-            if (sub.realtimeFetch === false) {
-                text = sub.cachedRaw || '';
-                if (!text) return '';
-            } else {
-                const requestHeaders = { 'User-Agent': userAgent };
-                const response = await Promise.race([
-                    fetch(new Request(sub.url, { headers: requestHeaders, redirect: "follow", cf: { insecureSkipVerify: true } })),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), 10000))
-                ]);
-                if (!response.ok) {
-                    // 回退到缓存
+    // 逐项按保存顺序生成，HTTP 订阅并行请求但保持顺序
+    const itemTasks = misubs.map((item) => {
+        if (!item.url.toLowerCase().startsWith('http')) {
+            // 手动节点
+            return Promise.resolve(item.isExpiredNode ? item.url : ((config.prependSubName) ? prependNodeName(item.url, '手动节点') : item.url));
+        }
+        // 订阅
+        const sub = item;
+        return (async () => {
+            try {
+                let text = '';
+                let usedSource = 'cache';
+                if (sub.realtimeFetch === false) {
                     text = sub.cachedRaw || '';
-                    usedSource = 'cache';
                     if (!text) return '';
                 } else {
-                    text = await response.text();
-                    usedSource = 'live';
-                }
-                try {
-                    const cleanedText = text.replace(/\s/g, '');
-                    if (cleanedText.length > 20 && /^[A-Za-z0-9+\/=]+$/.test(cleanedText)) {
-                        const binaryString = atob(cleanedText);
-                        const bytes = new Uint8Array(binaryString.length);
-                        for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
-                        text = new TextDecoder('utf-8').decode(bytes);
+                    const requestHeaders = { 'User-Agent': userAgent };
+                    const response = await Promise.race([
+                        fetch(new Request(sub.url, { headers: requestHeaders, redirect: 'follow', cf: { insecureSkipVerify: true } })),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), 10000))
+                    ]);
+                    if (!response.ok) {
+                        text = sub.cachedRaw || '';
+                        usedSource = 'cache';
+                        if (!text) return '';
+                    } else {
+                        text = await response.text();
+                        usedSource = 'live';
                     }
-                } catch (e) { }
-            }
-            let validNodes = text.replace(/\r\n/g, '\n').split('\n')
-                .map(line => line.trim()).filter(line => nodeRegex.test(line));
-
-            // [核心重構] 引入白名單 (keep:) 和黑名單 (exclude) 模式
-            if (sub.exclude && sub.exclude.trim() !== '') {
-                const rules = sub.exclude.trim().split('\n').map(r => r.trim()).filter(Boolean);
-
-                const keepRules = rules.filter(r => r.toLowerCase().startsWith('keep:'));
-
-                if (keepRules.length > 0) {
-                    // --- 白名單模式 (Inclusion Mode) ---
-                    const nameRegexParts = [];
-                    const protocolsToKeep = new Set();
-
-                    keepRules.forEach(rule => {
-                        const content = rule.substring('keep:'.length).trim();
-                        if (content.toLowerCase().startsWith('proto:')) {
-                            const protocols = content.substring('proto:'.length).split(',').map(p => p.trim().toLowerCase());
-                            protocols.forEach(p => protocolsToKeep.add(p));
-                        } else {
-                            nameRegexParts.push(content);
+                    try {
+                        const cleanedText = text.replace(/\s/g, '');
+                        if (cleanedText.length > 20 && /^[A-Za-z0-9+\/=]+$/.test(cleanedText)) {
+                            const binaryString = atob(cleanedText);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
+                            text = new TextDecoder('utf-8').decode(bytes);
                         }
-                    });
+                    } catch (e) { }
+                }
+                let validNodes = text.replace(/\r\n/g, '\n').split('\n')
+                    .map(line => line.trim()).filter(line => nodeRegex.test(line));
 
-                    const nameRegex = nameRegexParts.length > 0 ? new RegExp(nameRegexParts.join('|'), 'i') : null;
-
-                    validNodes = validNodes.filter(nodeLink => {
-                        // 檢查協議是否匹配
-                        const protocolMatch = nodeLink.match(/^(.*?):\/\//);
-                        const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
-                        if (protocolsToKeep.has(protocol)) {
-                            return true;
-                        }
-
-                        // 檢查名稱是否匹配
-                        if (nameRegex) {
-                            const hashIndex = nodeLink.lastIndexOf('#');
-                            if (hashIndex !== -1) {
-                                try {
-                                    const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
-                                    if (nameRegex.test(nodeName)) {
-                                        return true;
-                                    }
-                                } catch (e) { /* 忽略解碼錯誤 */ }
+                // 保留过滤规则
+                if (sub.exclude && sub.exclude.trim() !== '') {
+                    const rules = sub.exclude.trim().split('\n').map(r => r.trim()).filter(Boolean);
+                    const keepRules = rules.filter(r => r.toLowerCase().startsWith('keep:'));
+                    if (keepRules.length > 0) {
+                        const nameRegexParts = [];
+                        const protocolsToKeep = new Set();
+                        keepRules.forEach(rule => {
+                            const content = rule.substring('keep:'.length).trim();
+                            if (content.toLowerCase().startsWith('proto:')) {
+                                const protocols = content.substring('proto:'.length).split(',').map(p => p.trim().toLowerCase());
+                                protocols.forEach(p => protocolsToKeep.add(p));
+                            } else {
+                                nameRegexParts.push(content);
                             }
-                        }
-                        return false; // 白名單模式下，不匹配任何規則則排除
-                    });
-
-                } else {
-                    // --- 黑名單模式 (Exclusion Mode) ---
-                    const protocolsToExclude = new Set();
-                    const nameRegexParts = [];
-
-                    rules.forEach(rule => {
-                        if (rule.toLowerCase().startsWith('proto:')) {
-                            const protocols = rule.substring('proto:'.length).split(',').map(p => p.trim().toLowerCase());
-                            protocols.forEach(p => protocolsToExclude.add(p));
-                        } else {
-                            nameRegexParts.push(rule);
-                        }
-                    });
-
-                    const nameRegex = nameRegexParts.length > 0 ? new RegExp(nameRegexParts.join('|'), 'i') : null;
-
-                    validNodes = validNodes.filter(nodeLink => {
-                        const protocolMatch = nodeLink.match(/^(.*?):\/\//);
-                        const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
-                        if (protocolsToExclude.has(protocol)) {
+                        });
+                        const nameRegex = nameRegexParts.length > 0 ? new RegExp(nameRegexParts.join('|'), 'i') : null;
+                        validNodes = validNodes.filter(nodeLink => {
+                            const protocolMatch = nodeLink.match(/^(.*?):\/\//);
+                            const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
+                            if (protocolsToKeep.has(protocol)) return true;
+                            if (nameRegex) {
+                                const hashIndex = nodeLink.lastIndexOf('#');
+                                if (hashIndex !== -1) {
+                                    try {
+                                        const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
+                                        if (nameRegex.test(nodeName)) return true;
+                                    } catch (e) {}
+                                }
+                            }
                             return false;
-                        }
-
-                        if (nameRegex) {
-                            const hashIndex = nodeLink.lastIndexOf('#');
-                            if (hashIndex !== -1) {
-                                try {
-                                    const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
-                                    if (nameRegex.test(nodeName)) {
-                                        return false;
-                                    }
-                                } catch (e) { /* 忽略解碼錯誤 */ }
+                        });
+                    } else {
+                        const protocolsToExclude = new Set();
+                        const nameRegexParts = [];
+                        rules.forEach(rule => {
+                            if (rule.toLowerCase().startsWith('proto:')) {
+                                const protocols = rule.substring('proto:'.length).split(',').map(p => p.trim().toLowerCase());
+                                protocols.forEach(p => protocolsToExclude.add(p));
+                            } else { nameRegexParts.push(rule); }
+                        });
+                        const nameRegex = nameRegexParts.length > 0 ? new RegExp(nameRegexParts.join('|'), 'i') : null;
+                        validNodes = validNodes.filter(nodeLink => {
+                            const protocolMatch = nodeLink.match(/^(.*?):\/\//);
+                            const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
+                            if (protocolsToExclude.has(protocol)) return false;
+                            if (nameRegex) {
+                                const hashIndex = nodeLink.lastIndexOf('#');
+                                if (hashIndex !== -1) {
+                                    try {
+                                        const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
+                                        if (nameRegex.test(nodeName)) return false;
+                                    } catch (e) {}
+                                }
                             }
-                        }
-                        return true;
+                            return true;
+                        });
+                    }
+                }
+
+                const output = (config.prependSubName && sub.name)
+                    ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
+                    : validNodes.join('\n');
+                if (debugCollector) {
+                    debugCollector.push({
+                        id: sub.id,
+                        name: sub.name || '',
+                        realtimeFetch: sub.realtimeFetch !== false,
+                        usedSource,
+                        inputCount: (text.replace(/\r\n/g, '\n').split('\n').map(l => l.trim()).filter(l => nodeRegex.test(l))).length,
+                        outputCount: validNodes.length
                     });
                 }
-            }
-            const output = (config.prependSubName && sub.name)
-                ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
-                : validNodes.join('\n');
-            if (debugCollector) {
-                debugCollector.push({
-                    id: sub.id,
-                    name: sub.name || '',
-                    realtimeFetch: sub.realtimeFetch !== false,
-                    usedSource,
-                    inputCount: (text.replace(/\r\n/g, '\n').split('\n').map(l => l.trim()).filter(l => nodeRegex.test(l))).length,
-                    outputCount: validNodes.length
-                });
-            }
-            return output;
-        } catch (e) { return ''; }
+                return output;
+            } catch { return ''; }
+        })();
     });
-    const processedSubContents = await Promise.all(subPromises);
-    let combinedContent = '';
-    if (config.manualNodesPosition === 'after') {
-        combinedContent = (processedSubContents.join('\n') + '\n' + processedManualNodes);
-    } else { // default before
-        combinedContent = (processedManualNodes + '\n' + processedSubContents.join('\n'));
-    }
+    const pieces = await Promise.all(itemTasks);
+    const combinedContent = pieces.join('\n');
     const uniqueNodesString = [...new Set(combinedContent.split('\n').map(line => line.trim()).filter(line => line))].join('\n');
 
     // 确保最终的字符串在非空时以换行符结束，以兼容 subconverter
