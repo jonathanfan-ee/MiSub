@@ -63,7 +63,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     }
 
     try {
-      const data = await fetchNodeCount(subToUpdate.url);
+      const data = await fetchNodeCount(subToUpdate.url, subToUpdate.id);
       subToUpdate.nodeCount = data.count || 0;
       subToUpdate.userInfo = data.userInfo || null;
       

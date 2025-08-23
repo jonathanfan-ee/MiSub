@@ -609,13 +609,13 @@ async function handleApiRequest(request, env) {
 
         case '/node_count': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-            const { url: subUrl } = await request.json();
+            const { url: subUrl, id: subId } = await request.json();
             if (!subUrl || typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
                 return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
             }
-
+            
             const result = { count: 0, userInfo: null };
-
+            
             try {
                 const fetchOptions = {
                     headers: { 'User-Agent': 'MiSub-Node-Counter/2.0' },
@@ -627,13 +627,13 @@ async function handleApiRequest(request, env) {
                     redirect: "follow",
                     cf: { insecureSkipVerify: true }
                 };
-
+                
                 const trafficRequest = fetch(new Request(subUrl, trafficFetchOptions));
                 const nodeCountRequest = fetch(new Request(subUrl, fetchOptions));
-
+                
                 // --- [核心修正] 使用 Promise.allSettled 替换 Promise.all ---
                 const responses = await Promise.allSettled([trafficRequest, nodeCountRequest]);
-
+                
                 // 1. 处理流量请求的结果
                 if (responses[0].status === 'fulfilled' && responses[0].value.ok) {
                     const trafficResponse = responses[0].value;
@@ -649,7 +649,7 @@ async function handleApiRequest(request, env) {
                 } else if (responses[0].status === 'rejected') {
                     console.error(`Traffic request for ${subUrl} rejected:`, responses[0].reason);
                 }
-
+                
                 // 2. 处理节点数请求的结果
                 if (responses[1].status === 'fulfilled' && responses[1].value.ok) {
                     const nodeCountResponse = responses[1].value;
@@ -664,7 +664,7 @@ async function handleApiRequest(request, env) {
                     try {
                         const storageAdapter = await getStorageAdapter(env);
                         const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                        const subToUpdateForCache = originalSubs.find(s => s.url === subUrl);
+                        const subToUpdateForCache = originalSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
                         if (subToUpdateForCache) {
                             subToUpdateForCache.cachedRawText = text;
                             subToUpdateForCache.cachedAt = new Date().toISOString();
@@ -676,27 +676,27 @@ async function handleApiRequest(request, env) {
                 } else if (responses[1].status === 'rejected') {
                     console.error(`Node count request for ${subUrl} rejected:`, responses[1].reason);
                 }
-
+                
                 // {{ AURA-X: Modify - 使用存储适配器优化节点计数更新. Approval: 寸止(ID:1735459200). }}
                 // 只有在至少获取到一个有效信息时，才更新数据库
                 if (result.userInfo || result.count > 0) {
                     const storageAdapter = await getStorageAdapter(env);
                     const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
                     const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
-                    const subToUpdate = allSubs.find(s => s.url === subUrl);
-
+                    const subToUpdate = allSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
+                    
                     if (subToUpdate) {
                         subToUpdate.nodeCount = result.count;
                         subToUpdate.userInfo = result.userInfo;
-
+                        
                         await storageAdapter.put(KV_KEY_SUBS, allSubs);
                     }
                 }
-
+                
             } catch (e) {
                 console.error(`[API Error /node_count] Unhandled exception for URL: ${subUrl}`, e);
             }
-
+            
             return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
         }
 
