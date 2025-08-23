@@ -563,25 +563,8 @@ async function handleApiRequest(request, env) {
                 // 步骤6: 保存数据到存储（使用存储适配器）
                 try {
                     const storageAdapter = await getStorageAdapter(env);
-                    // 合并现有数据以保留 cachedRawText / cachedAt
-                    const existingSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                    const existingById = new Map(existingSubs.map(s => [s.id || s.url, s]));
-                    const mergedSubs = misubs.map(incoming => {
-                        const key = incoming.id || incoming.url;
-                        const existing = existingById.get(key);
-                        if (existing && incoming.url && incoming.url.startsWith('http')) {
-                            if (!incoming.cachedRawText && existing.cachedRawText) {
-                                incoming.cachedRawText = existing.cachedRawText;
-                            }
-                            if (!incoming.cachedAt && existing.cachedAt) {
-                                incoming.cachedAt = existing.cachedAt;
-                            }
-                        }
-                        return incoming;
-                    });
-
                     await Promise.all([
-                        storageAdapter.put(KV_KEY_SUBS, mergedSubs),
+                        storageAdapter.put(KV_KEY_SUBS, misubs),
                         storageAdapter.put(KV_KEY_PROFILES, profiles)
                     ]);
                 } catch (storageError) {
@@ -608,12 +591,13 @@ async function handleApiRequest(request, env) {
 
         case '/node_count': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-            const { url: subUrl, id: subId } = await request.json();
+            const { url: subUrl } = await request.json();
             if (!subUrl || typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
                 return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
             }
 
             const result = { count: 0, userInfo: null };
+            let decodedText = null;
 
             try {
                 const fetchOptions = {
@@ -655,64 +639,32 @@ async function handleApiRequest(request, env) {
                     const text = await nodeCountResponse.text();
                     let decoded = '';
                     try { decoded = atob(text.replace(/\s/g, '')); } catch { decoded = text; }
+                    decodedText = decoded;
                     const lineMatches = decoded.match(/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls):\/\//gm);
                     if (lineMatches) {
                         result.count = lineMatches.length;
                     }
-                    // 成功抓取时，缓存原始上游文本供后续不刷新访问使用
-                    try {
-                        const storageAdapter = await getStorageAdapter(env);
-                        const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                        const subToUpdateForCache = originalSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
-                        if (subToUpdateForCache) {
-                            subToUpdateForCache.cachedRawText = text;
-                            subToUpdateForCache.cachedAt = new Date().toISOString();
-                            await storageAdapter.put(KV_KEY_SUBS, originalSubs);
-                        }
-                    } catch (cacheErr) {
-                        console.error('[Cache] Failed to cache upstream text for', subUrl, cacheErr);
-                    }
-                } else if (responses[1].status === 'fulfilled' && !responses[1].value.ok) {
-                    // 请求返回非 2xx，清空缓存以反映无节点
-                    try {
-                        const storageAdapter = await getStorageAdapter(env);
-                        const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                        const subToUpdateForCache = originalSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
-                        if (subToUpdateForCache) {
-                            subToUpdateForCache.cachedRawText = '';
-                            subToUpdateForCache.cachedAt = new Date().toISOString();
-                            await storageAdapter.put(KV_KEY_SUBS, originalSubs);
-                        }
-                    } catch (cacheErr) {
-                        console.error('[Cache] Failed to clear cache for', subUrl, cacheErr);
-                    }
                 } else if (responses[1].status === 'rejected') {
                     console.error(`Node count request for ${subUrl} rejected:`, responses[1].reason);
-                    // 抓取异常，清空缓存
-                    try {
-                        const storageAdapter = await getStorageAdapter(env);
-                        const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                        const subToUpdateForCache = originalSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
-                        if (subToUpdateForCache) {
-                            subToUpdateForCache.cachedRawText = '';
-                            subToUpdateForCache.cachedAt = new Date().toISOString();
-                            await storageAdapter.put(KV_KEY_SUBS, originalSubs);
-                        }
-                    } catch (cacheErr) {
-                        console.error('[Cache] Failed to clear cache for', subUrl, cacheErr);
-                    }
                 }
 
                 // {{ AURA-X: Modify - 使用存储适配器优化节点计数更新. Approval: 寸止(ID:1735459200). }}
-                // 无论是否获取到有效信息，都持久化最新的 nodeCount/userInfo，使前端与聚合输出一致
-                {
+                // 只有在至少获取到一个有效信息时，才更新数据库
+                if (result.userInfo || result.count > 0) {
                     const storageAdapter = await getStorageAdapter(env);
                     const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
                     const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
-                    const subToUpdate = allSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
+                    const subToUpdate = allSubs.find(s => s.url === subUrl);
+
                     if (subToUpdate) {
                         subToUpdate.nodeCount = result.count;
                         subToUpdate.userInfo = result.userInfo;
+                        if (decodedText && decodedText.length > 0) {
+                            subToUpdate.cachedRaw = decodedText;
+                            subToUpdate.cachedAt = Date.now();
+                            subToUpdate.cachedFromUrl = subUrl;
+                        }
+
                         await storageAdapter.put(KV_KEY_SUBS, allSubs);
                     }
                 }
@@ -807,22 +759,18 @@ async function handleApiRequest(request, env) {
                             const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//gm;
                             const matches = decoded.match(nodeRegex);
                             sub.nodeCount = matches ? matches.length : 0;
-
-                            // 成功抓取时写入缓存
-                            sub.cachedRawText = text;
-                            sub.cachedAt = new Date().toISOString();
+                            // 保存原始解码后的订阅文本以供后续聚合使用
+                            if (decoded && decoded.length > 0) {
+                                sub.cachedRaw = decoded;
+                                sub.cachedAt = Date.now();
+                                sub.cachedFromUrl = sub.url;
+                            }
 
                             return { id: sub.id, success: true, nodeCount: sub.nodeCount };
                         } else {
-                            // 失败时清空缓存
-                            sub.cachedRawText = '';
-                            sub.cachedAt = new Date().toISOString();
                             return { id: sub.id, success: false, error: `HTTP ${response.status}` };
                         }
                     } catch (error) {
-                        // 异常时清空缓存
-                        sub.cachedRawText = '';
-                        sub.cachedAt = new Date().toISOString();
                         return { id: sub.id, success: false, error: error.message };
                     }
                 });
@@ -941,17 +889,11 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
     const subPromises = httpSubs.map(async (sub) => {
         try {
             let text = '';
-            // 仅使用每个订阅自己的设置；未设置时默认开启刷新
-            const effectiveRefresh = (sub.refreshOnAccess !== undefined) ? !!sub.refreshOnAccess : true;
-            if (!effectiveRefresh) {
-                // 仅使用缓存内容，不进行网络请求
-                if (sub.cachedRawText && typeof sub.cachedRawText === 'string' && sub.cachedRawText.length > 0) {
-                    text = sub.cachedRawText;
-                } else {
-                    return '';
-                }
+            // 默认开启实时拉取；当 sub.realtimeFetch === false 时改为使用缓存
+            if (sub.realtimeFetch === false) {
+                text = sub.cachedRaw || '';
+                if (!text) return '';
             } else {
-                // 实时刷新并写入缓存
                 const requestHeaders = { 'User-Agent': userAgent };
                 const response = await Promise.race([
                     fetch(new Request(sub.url, { headers: requestHeaders, redirect: "follow", cf: { insecureSkipVerify: true } })),
@@ -959,30 +901,16 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                 ]);
                 if (!response.ok) return '';
                 text = await response.text();
-
-                // 尝试缓存原始文本
                 try {
-                    const storageAdapter = await getStorageAdapter(context.env);
-                    const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                    const index = originalSubs.findIndex(s => s.id === sub.id);
-                    if (index !== -1) {
-                        originalSubs[index].cachedRawText = text;
-                        originalSubs[index].cachedAt = new Date().toISOString();
-                        await storageAdapter.put(KV_KEY_SUBS, originalSubs);
+                    const cleanedText = text.replace(/\s/g, '');
+                    if (cleanedText.length > 20 && /^[A-Za-z0-9+\/=]+$/.test(cleanedText)) {
+                        const binaryString = atob(cleanedText);
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
+                        text = new TextDecoder('utf-8').decode(bytes);
                     }
-                } catch (cacheError) {
-                    console.error('[Cache] Failed to store cachedRawText for', sub.name || sub.id, cacheError);
-                }
+                } catch (e) { }
             }
-            try {
-                const cleanedText = text.replace(/\s/g, '');
-                if (cleanedText.length > 20 && /^[A-Za-z0-9+\/=]+$/.test(cleanedText)) {
-                    const binaryString = atob(cleanedText);
-                    const bytes = new Uint8Array(binaryString.length);
-                    for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
-                    text = new TextDecoder('utf-8').decode(bytes);
-                }
-            } catch (e) { }
             let validNodes = text.replace(/\r\n/g, '\n').split('\n')
                 .map(line => line.trim()).filter(line => nodeRegex.test(line));
 

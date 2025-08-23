@@ -198,7 +198,6 @@ watch(() => props.show, (newValue) => {
             </label>
           </div>
         </div>
-        
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">数据存储类型</label>
           <div class="space-y-3">

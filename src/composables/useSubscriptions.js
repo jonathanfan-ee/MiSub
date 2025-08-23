@@ -18,8 +18,11 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       isUpdating: false,
       userInfo: sub.userInfo || null,
       exclude: sub.exclude || '', // 新增 exclude 属性
-      // 默认按订阅启用访问时刷新；仅当明确为 false 时关闭
-      refreshOnAccess: sub.refreshOnAccess !== false,
+      // 新增：聚合实时拉取控制与缓存字段
+      realtimeFetch: sub.realtimeFetch !== false, // 默认开启实时拉取
+      cachedRaw: sub.cachedRaw || '',
+      cachedAt: sub.cachedAt || null,
+      cachedFromUrl: sub.cachedFromUrl || null,
     }));
     // [最終修正] 移除此處的自動更新迴圈，以防止本地開發伺服器因併發請求過多而崩潰。
     // subscriptions.value.forEach(sub => handleUpdateNodeCount(sub.id, true)); 
@@ -65,7 +68,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     }
 
     try {
-      const data = await fetchNodeCount(subToUpdate.url, subToUpdate.id);
+      const data = await fetchNodeCount(subToUpdate.url);
       subToUpdate.nodeCount = data.count || 0;
       subToUpdate.userInfo = data.userInfo || null;
 
@@ -93,11 +96,11 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     if (index !== -1) {
       if (subscriptions.value[index].url !== updatedSub.url) {
         updatedSub.nodeCount = 0;
-        // URL 變更時是否自动更新：尊重每订阅的 refreshOnAccess（默认开启）
-        const shouldAutoRefresh = updatedSub.refreshOnAccess !== false;
-        if (shouldAutoRefresh) {
-          handleUpdateNodeCount(updatedSub.id);
-        }
+        // URL 变更时清空缓存，以避免使用旧缓存
+        updatedSub.cachedRaw = '';
+        updatedSub.cachedAt = null;
+        updatedSub.cachedFromUrl = null;
+        handleUpdateNodeCount(updatedSub.id); // URL 變更時自動更新單個
       }
       subscriptions.value[index] = updatedSub;
       markDirty();
