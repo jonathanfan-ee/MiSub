@@ -167,7 +167,9 @@ const defaultSettings = {
     profileToken: 'profiles',
     subConverter: 'url.v1.mk',
     subConfig: 'https://raw.githubusercontent.com/cmliu/ACL4SSR/refs/heads/main/Clash/config/ACL4SSR_Online_Full.ini',
-    prependSubName: true,
+    prependSubName: true, // 兼容旧字段
+    prependSubNameSubs: true, // 是否给机场订阅节点添加订阅名前缀
+    prependSubNameManual: false, // 是否给手动节点添加“手动节点”前缀
     NotifyThresholdDays: 3,
     NotifyThresholdPercent: 90,
     storageType: 'kv', // 新增：数据存储类型，默认 KV，可选 'd1'
@@ -905,7 +907,8 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
     const itemTasks = misubs.map((item) => {
         if (!item.url.toLowerCase().startsWith('http')) {
             // 手动节点
-            return Promise.resolve(item.isExpiredNode ? item.url : ((config.prependSubName) ? prependNodeName(item.url, '手动节点') : item.url));
+            const shouldPrefixManual = (typeof config.prependSubNameManual === 'boolean') ? config.prependSubNameManual : config.prependSubName;
+            return Promise.resolve(item.isExpiredNode ? item.url : (shouldPrefixManual ? prependNodeName(item.url, '手动节点') : item.url));
         }
         // 订阅
         const sub = item;
@@ -1003,7 +1006,8 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                     }
                 }
 
-                const output = (config.prependSubName && sub.name)
+                const shouldPrefixSubs = (typeof config.prependSubNameSubs === 'boolean') ? config.prependSubNameSubs : config.prependSubName;
+                const output = (shouldPrefixSubs && sub.name)
                     ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
                     : validNodes.join('\n');
                 if (debugCollector) {
