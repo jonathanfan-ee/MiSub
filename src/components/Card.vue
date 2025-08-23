@@ -90,11 +90,24 @@ const expiryInfo = computed(() => {
 });
 
 const showCacheModal = ref(false);
+function decodeMaybeBase64ToUtf8(input) {
+  try {
+    const cleaned = input.replace(/\s/g, '');
+    if (cleaned.length > 20 && /^[A-Za-z0-9+/=]+$/.test(cleaned)) {
+      const binaryString = atob(cleaned);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+      return new TextDecoder('utf-8').decode(bytes);
+    }
+  } catch {}
+  return input;
+}
+
 const cachePreview = computed(() => {
   const raw = props.misub.cachedRaw || '';
   if (!raw) return '';
-  // 只显示前 2000 字符，避免超长
-  return raw.length > 2000 ? raw.slice(0, 2000) + '\n...（已截断）' : raw;
+  const decoded = decodeMaybeBase64ToUtf8(raw);
+  return decoded.length > 2000 ? decoded.slice(0, 2000) + '\n...（已截断）' : decoded;
 });
 
 const copyCache = async () => {

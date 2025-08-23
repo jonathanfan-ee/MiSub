@@ -184,6 +184,20 @@ const formatBytes = (bytes, decimals = 2) => {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 };
 
+// 安全解碼：優先嘗試將 Base64 內容按 UTF-8 轉為純文本，否則原樣返回
+function decodeMaybeBase64ToUtf8(input) {
+    try {
+        const cleaned = input.replace(/\s/g, '');
+        if (cleaned.length > 20 && /^[A-Za-z0-9+/=]+$/.test(cleaned)) {
+            const binaryString = atob(cleaned);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
+            return new TextDecoder('utf-8').decode(bytes);
+        }
+    } catch {}
+    return input;
+}
+
 // --- TG 通知函式 (无修改) ---
 async function sendTgNotification(settings, message) {
     if (!settings.BotToken || !settings.ChatID) {
@@ -637,8 +651,7 @@ async function handleApiRequest(request, env) {
                 if (responses[1].status === 'fulfilled' && responses[1].value.ok) {
                     const nodeCountResponse = responses[1].value;
                     const text = await nodeCountResponse.text();
-                    let decoded = '';
-                    try { decoded = atob(text.replace(/\s/g, '')); } catch { decoded = text; }
+                    const decoded = decodeMaybeBase64ToUtf8(text);
                     decodedText = decoded;
                     result.cachedRaw = decodedText;
                     const lineMatches = decoded.match(/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls):\/\//gm);
@@ -763,12 +776,7 @@ async function handleApiRequest(request, env) {
 
                             // 更新节点数量
                             const text = await response.text();
-                            let decoded = '';
-                            try {
-                                decoded = atob(text.replace(/\s/g, ''));
-                            } catch {
-                                decoded = text;
-                            }
+                            const decoded = decodeMaybeBase64ToUtf8(text);
                             const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//gm;
                             const matches = decoded.match(nodeRegex);
                             sub.nodeCount = matches ? matches.length : 0;
