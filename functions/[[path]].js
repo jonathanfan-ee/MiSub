@@ -591,7 +591,7 @@ async function handleApiRequest(request, env) {
 
         case '/node_count': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-            const { url: subUrl } = await request.json();
+            const { url: subUrl, id: subId } = await request.json();
             if (!subUrl || typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
                 return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
             }
@@ -658,7 +658,13 @@ async function handleApiRequest(request, env) {
                 const storageAdapter = await getStorageAdapter(env);
                 const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
                 const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
-                const subToUpdate = allSubs.find(s => s.url === subUrl);
+                let subToUpdate = null;
+                if (subId) {
+                    subToUpdate = allSubs.find(s => s.id === subId);
+                }
+                if (!subToUpdate) {
+                    subToUpdate = allSubs.find(s => s.url === subUrl);
+                }
 
                 if (subToUpdate) {
                     subToUpdate.nodeCount = result.count;
@@ -923,13 +929,6 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             }
             let validNodes = text.replace(/\r\n/g, '\n').split('\n')
                 .map(line => line.trim()).filter(line => nodeRegex.test(line));
-
-            // 若實時請求成功但內容不是節點（例如返回 200 的過期提示頁），回退到緩存
-            if (validNodes.length === 0 && sub.cachedRaw && sub.cachedRaw.length > 0) {
-                const cachedText = sub.cachedRaw;
-                validNodes = cachedText.replace(/\r\n/g, '\n').split('\n')
-                    .map(line => line.trim()).filter(line => nodeRegex.test(line));
-            }
 
             // [核心重構] 引入白名單 (keep:) 和黑名單 (exclude) 模式
             if (sub.exclude && sub.exclude.trim() !== '') {
