@@ -886,7 +886,7 @@ function prependNodeName(link, prefix) {
 }
 
 // --- 节点列表生成函数 ---
-async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '') {
+async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '', debugCollector = null) {
     const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//;
     const processedManualNodes = misubs.filter(sub => !sub.url.toLowerCase().startsWith('http')).map(node => {
         if (node.isExpiredNode) {
@@ -900,6 +900,7 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
     const subPromises = httpSubs.map(async (sub) => {
         try {
             let text = '';
+            let usedSource = 'cache';
             // 默认开启实时拉取；当 sub.realtimeFetch === false 时改为使用缓存
             if (sub.realtimeFetch === false) {
                 text = sub.cachedRaw || '';
@@ -913,9 +914,11 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                 if (!response.ok) {
                     // 回退到缓存
                     text = sub.cachedRaw || '';
+                    usedSource = 'cache';
                     if (!text) return '';
                 } else {
                     text = await response.text();
+                    usedSource = 'live';
                 }
                 try {
                     const cleanedText = text.replace(/\s/g, '');
@@ -1014,9 +1017,20 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                     });
                 }
             }
-            return (config.prependSubName && sub.name)
+            const output = (config.prependSubName && sub.name)
                 ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
                 : validNodes.join('\n');
+            if (debugCollector) {
+                debugCollector.push({
+                    id: sub.id,
+                    name: sub.name || '',
+                    realtimeFetch: sub.realtimeFetch !== false,
+                    usedSource,
+                    inputCount: (text.replace(/\r\n/g, '\n').split('\n').map(l => l.trim()).filter(l => nodeRegex.test(l))).length,
+                    outputCount: validNodes.length
+                });
+            }
+            return output;
         } catch (e) { return ''; }
     });
     const processedSubContents = await Promise.all(subPromises);
@@ -1219,7 +1233,27 @@ async function handleMisubRequest(context) {
         }
     }
 
-    const combinedNodeList = await generateCombinedNodeList(context, config, userAgentHeader, targetMisubs, prependedContentForSubconverter);
+    const debugMode = url.searchParams.has('__debug');
+    const debugCollector = debugMode ? [] : null;
+    const combinedNodeList = await generateCombinedNodeList(context, config, userAgentHeader, targetMisubs, prependedContentForSubconverter, debugCollector);
+
+    if (debugMode) {
+        // 直接返回純文本，包含調試信息與最終節點列表
+        const lines = [];
+        lines.push('# MiSub Debug Report');
+        lines.push(`Target: ${profileIdentifier ? 'profile' : 'default'}`);
+        lines.push(`Items: ${targetMisubs.length}`);
+        if (debugCollector) {
+            debugCollector.forEach(d => {
+                lines.push(`- ${d.name || d.id}: source=${d.usedSource}${d.realtimeFetch ? '(live-on)' : '(live-off)'} input=${d.inputCount} output=${d.outputCount}`);
+            });
+        }
+        lines.push('');
+        lines.push('--- Combined Nodes ---');
+        lines.push(combinedNodeList);
+        const headers = { "Content-Type": "text/plain; charset=utf-8", 'Cache-Control': 'no-store, no-cache' };
+        return new Response(lines.join('\n'), { headers });
+    }
 
     if (targetFormat === 'base64') {
         let contentToEncode;
