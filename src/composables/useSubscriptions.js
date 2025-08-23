@@ -23,6 +23,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       cachedRaw: sub.cachedRaw || '',
       cachedAt: sub.cachedAt || null,
       cachedFromUrl: sub.cachedFromUrl || null,
+      cachedRawPresent: typeof sub.cachedRawPresent === 'boolean' ? sub.cachedRawPresent : Boolean(sub.cachedRaw && sub.cachedRaw.length > 0),
     }));
     // [最終修正] 移除此處的自動更新迴圈，以防止本地開發伺服器因併發請求過多而崩潰。
     // subscriptions.value.forEach(sub => handleUpdateNodeCount(sub.id, true)); 
@@ -74,11 +75,16 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       if (typeof data.cachedAt !== 'undefined') {
         subToUpdate.cachedAt = data.cachedAt;
       }
-      // 若後端沒有返回 cachedRaw 本身，透過 cachedRawPresent 來驅動徽標
+      // 後端若帶回 cachedRawPresent 與 cachedRaw，保持一致
       if (typeof data.cachedRawPresent !== 'undefined') {
+        subToUpdate.cachedRawPresent = !!data.cachedRawPresent;
         if (!data.cachedRawPresent) {
           subToUpdate.cachedRaw = '';
         }
+      }
+      if (typeof data.cachedRaw === 'string') {
+        subToUpdate.cachedRaw = data.cachedRaw;
+        subToUpdate.cachedRawPresent = subToUpdate.cachedRaw.length > 0;
       }
 
       if (!isInitialLoad) {
