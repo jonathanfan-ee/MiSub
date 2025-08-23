@@ -14,6 +14,7 @@ import ProfilePanel from './ProfilePanel.vue';
 import SubscriptionPanel from './SubscriptionPanel.vue';
 import ManualNodePanel from './ManualNodePanel.vue';
 import Modal from './Modal.vue';
+import UnifiedSortModal from './UnifiedSortModal.vue';
 
 const SettingsModal = defineAsyncComponent(() => import('./SettingsModal.vue'));
 const BulkImportModal = defineAsyncComponent(() => import('./BulkImportModal.vue'));
@@ -69,6 +70,7 @@ const showBulkImportModal = ref(false);
 const showDeleteSubsModal = ref(false);
 const showDeleteNodesModal = ref(false);
 const showSubscriptionImportModal = ref(false);
+const showUnifiedSortModal = ref(false);
 // --- 初始化與生命週期 ---
 const initializeState = () => {
   isLoading.value = true;
@@ -347,6 +349,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
         </span>
       </div>
       <div class="flex items-center gap-2">
+        <button @click="showUnifiedSortModal = true" class="text-sm font-semibold px-4 py-2 rounded-lg text-teal-600 dark:text-teal-300 border-2 border-teal-500/50 hover:bg-teal-500/10 transition-colors">统一排序</button>
         <button @click="showBulkImportModal = true" class="text-sm font-semibold px-4 py-2 rounded-lg text-indigo-600 dark:text-indigo-400 border-2 border-indigo-500/50 hover:bg-indigo-500/10 transition-colors">批量导入</button>
       </div>
     </div>
@@ -470,6 +473,23 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
     :import-backup="importBackup"
   />
   <SubscriptionImportModal :show="showSubscriptionImportModal" @update:show="showSubscriptionImportModal = $event" :add-nodes-from-bulk="addNodesFromBulk" />
+  <UnifiedSortModal :show="showUnifiedSortModal" @update:show="showUnifiedSortModal = $event" :items="[
+      ...subscriptions.map(s => ({ id: s.id, name: s.name, type: 'sub' })),
+      ...manualNodes.map(n => ({ id: n.id, name: n.name, type: 'node' }))
+    ]" @confirm="(orderedIds) => {
+      const subMap = new Map(subscriptions.map(s => [s.id, s]));
+      const nodeMap = new Map(manualNodes.map(n => [n.id, n]));
+      const newSubs = []; const newNodes = [];
+      for (const id of orderedIds) {
+        if (subMap.has(id)) newSubs.push(subMap.get(id));
+        else if (nodeMap.has(id)) newNodes.push(nodeMap.get(id));
+      }
+      for (const s of subscriptions) if (!newSubs.includes(s)) newSubs.push(s);
+      for (const n of manualNodes) if (!newNodes.includes(n)) newNodes.push(n);
+      subscriptions.splice(0, subscriptions.length, ...newSubs);
+      manualNodes.splice(0, manualNodes.length, ...newNodes);
+      markDirty();
+    }" />
 </template>
 
 <style scoped>
