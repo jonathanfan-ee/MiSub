@@ -208,20 +208,7 @@ watch(() => props.show, (newValue) => {
             </label>
           </div>
         </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">手动节点位置</label>
-          <div class="mt-2 grid grid-cols-2 gap-2">
-            <label class="flex items-center gap-2 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg cursor-pointer">
-              <input type="radio" value="before" v-model="settings.manualNodesPosition" class="text-indigo-600">
-              <span class="text-sm text-gray-600 dark:text-gray-300">手动节点在前</span>
-            </label>
-            <label class="flex items-center gap-2 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg cursor-pointer">
-              <input type="radio" value="after" v-model="settings.manualNodesPosition" class="text-indigo-600">
-              <span class="text-sm text-gray-600 dark:text-gray-300">手动节点在后</span>
-            </label>
-          </div>
-          <p class="text-xs text-gray-400 mt-1">说明：此为默认顺序。若你使用“统一排序”并保存，统一排序的结果将覆盖此默认顺序；再次调整任一项并保存，即以最后保存的为准。</p>
-        </div>
+        <!-- 移除“手动节点位置”设置，统一通过“统一排序”控制顺序，默认重置为“手动在前，订阅在后”。 -->
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">数据存储类型</label>
           <div class="space-y-3">

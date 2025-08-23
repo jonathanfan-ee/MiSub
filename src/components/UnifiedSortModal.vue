@@ -6,6 +6,7 @@ import Modal from './Modal.vue';
 const props = defineProps({
   show: Boolean,
   items: Array, // [{id, name, type}] type in {'sub','node'}
+  defaultItems: Array,
 });
 const emit = defineEmits(['update:show','confirm']);
 
@@ -16,11 +17,20 @@ const handleConfirm = () => {
   emit('confirm', localItems.value.map(i => i.id));
   emit('update:show', false);
 };
+
+const handleReset = () => {
+  localItems.value = (props.defaultItems || []).map(i => ({ ...i }));
+};
 </script>
 
 <template>
   <Modal :show="show" @update:show="emit('update:show', $event)" @confirm="handleConfirm" :size="'2xl'">
-    <template #title><h3 class="text-lg font-bold text-gray-800 dark:text-white">统一排序（订阅 + 手动节点）</h3></template>
+    <template #title>
+      <div class="flex items-center justify-between w-full">
+        <h3 class="text-lg font-bold text-gray-800 dark:text-white">统一排序（订阅 + 手动节点）</h3>
+        <button type="button" @click="handleReset" class="px-2 py-1 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200">重置</button>
+      </div>
+    </template>
     <template #body>
       <div class="text-xs text-gray-500 dark:text-gray-400 mb-3">拖拽以改变顺序（支持跨类别）。</div>
       <draggable v-model="localItems" item-key="id" class="space-y-2" animation="250">

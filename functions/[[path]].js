@@ -172,7 +172,7 @@ const defaultSettings = {
     NotifyThresholdPercent: 90,
     storageType: 'kv', // 新增：数据存储类型，默认 KV，可选 'd1'
     showTrafficRemainingNode: true, // 是否在聚合顶部插入“流量剩余”虚拟节点
-    manualNodesPosition: 'before' // 手动节点相对机场订阅的位置：before / after
+    // manualNodesPosition: 已废弃，由统一排序控制
 };
 
 const formatBytes = (bytes, decimals = 2) => {

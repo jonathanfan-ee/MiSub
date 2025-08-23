@@ -507,6 +507,10 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
       const subItems = subscriptions.map(s => ({ id: s.id, name: s.name, type: 'sub' }));
       const nodeItems = manualNodes.map(n => ({ id: n.id, name: n.name, type: 'node' }));
       return (config.manualNodesPosition === 'after') ? [...subItems, ...nodeItems] : [...nodeItems, ...subItems];
+    })()" :default-items="(() => {
+      const subItems = subscriptions.map(s => ({ id: s.id, name: s.name, type: 'sub' }));
+      const nodeItems = manualNodes.map(n => ({ id: n.id, name: n.name, type: 'node' }));
+      return [...nodeItems, ...subItems];
     })()" @confirm="(orderedIds) => {
       const subMap = new Map(subscriptions.map(s => [s.id, s]));
       const nodeMap = new Map(manualNodes.map(n => [n.id, n]));
