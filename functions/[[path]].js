@@ -668,6 +668,10 @@ async function handleApiRequest(request, env) {
                     subToUpdate.cachedFromUrl = subUrl;
 
                     await storageAdapter.put(KV_KEY_SUBS, allSubs);
+
+                    // 回傳給前端用於 UI 顯示的緩存元信息
+                    result.cachedAt = subToUpdate.cachedAt;
+                    result.cachedRawPresent = !!(subToUpdate.cachedRaw && subToUpdate.cachedRaw.length > 0);
                 }
 
             } catch (e) {

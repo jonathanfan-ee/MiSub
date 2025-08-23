@@ -71,6 +71,15 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       const data = await fetchNodeCount(subToUpdate.url);
       subToUpdate.nodeCount = data.count || 0;
       subToUpdate.userInfo = data.userInfo || null;
+      if (typeof data.cachedAt !== 'undefined') {
+        subToUpdate.cachedAt = data.cachedAt;
+      }
+      // 若後端沒有返回 cachedRaw 本身，透過 cachedRawPresent 來驅動徽標
+      if (typeof data.cachedRawPresent !== 'undefined') {
+        if (!data.cachedRawPresent) {
+          subToUpdate.cachedRaw = '';
+        }
+      }
 
       if (!isInitialLoad) {
         showToast(`${subToUpdate.name || '订阅'} 更新成功！`, 'success');
