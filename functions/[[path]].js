@@ -564,8 +564,25 @@ async function handleApiRequest(request, env) {
                 // 步骤6: 保存数据到存储（使用存储适配器）
                 try {
                     const storageAdapter = await getStorageAdapter(env);
+                    // 合并现有数据以保留 cachedRawText / cachedAt
+                    const existingSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
+                    const existingById = new Map(existingSubs.map(s => [s.id || s.url, s]));
+                    const mergedSubs = misubs.map(incoming => {
+                        const key = incoming.id || incoming.url;
+                        const existing = existingById.get(key);
+                        if (existing && incoming.url && incoming.url.startsWith('http')) {
+                            if (!incoming.cachedRawText && existing.cachedRawText) {
+                                incoming.cachedRawText = existing.cachedRawText;
+                            }
+                            if (!incoming.cachedAt && existing.cachedAt) {
+                                incoming.cachedAt = existing.cachedAt;
+                            }
+                        }
+                        return incoming;
+                    });
+
                     await Promise.all([
-                        storageAdapter.put(KV_KEY_SUBS, misubs),
+                        storageAdapter.put(KV_KEY_SUBS, mergedSubs),
                         storageAdapter.put(KV_KEY_PROFILES, profiles)
                     ]);
                 } catch (storageError) {
@@ -766,6 +783,10 @@ async function handleApiRequest(request, env) {
                             const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//gm;
                             const matches = decoded.match(nodeRegex);
                             sub.nodeCount = matches ? matches.length : 0;
+
+                            // 缓存原始上游文本，供访问时不刷新场景使用
+                            sub.cachedRawText = text;
+                            sub.cachedAt = new Date().toISOString();
 
                             return { id: sub.id, success: true, nodeCount: sub.nodeCount };
                         } else {
