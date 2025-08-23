@@ -900,8 +900,13 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                     fetch(new Request(sub.url, { headers: requestHeaders, redirect: "follow", cf: { insecureSkipVerify: true } })),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), 10000))
                 ]);
-                if (!response.ok) return '';
-                text = await response.text();
+                if (!response.ok) {
+                    // 回退到缓存
+                    text = sub.cachedRaw || '';
+                    if (!text) return '';
+                } else {
+                    text = await response.text();
+                }
                 try {
                     const cleanedText = text.replace(/\s/g, '');
                     if (cleanedText.length > 20 && /^[A-Za-z0-9+\/=]+$/.test(cleanedText)) {

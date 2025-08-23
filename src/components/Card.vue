@@ -114,6 +114,12 @@ const expiryInfo = computed(() => {
     
     <div class="mt-2 grow flex flex-col justify-center space-y-2">
       <input type="text" :value="misub.url" readonly class="w-full text-sm text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800/50 rounded-lg px-3 py-2 focus:outline-hidden font-mono" />
+      <div class="flex items-center gap-2 mt-1 text-xs">
+        <span :class="misub.cachedRaw && misub.cachedRaw.length > 0 ? 'text-green-600 dark:text-green-400' : 'text-gray-400'">
+          {{ misub.cachedRaw && misub.cachedRaw.length > 0 ? '缓存可用' : '无缓存' }}
+        </span>
+        <span v-if="misub.cachedAt" class="text-gray-400">· {{ new Date(misub.cachedAt).toLocaleString() }}</span>
+      </div>
       <div v-if="trafficInfo" class="space-y-1 pt-1">
         <div class="flex justify-between text-xs font-mono"><span class="text-gray-600 dark:text-gray-400">{{ trafficInfo.used }}</span><span class="text-gray-600 dark:text-gray-400">{{ trafficInfo.total }}</span></div>
         <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5"><div class="bg-linear-to-r from-blue-500 to-indigo-600 h-1.5 rounded-full" :style="{ width: trafficInfo.percentage + '%' }"></div></div>
