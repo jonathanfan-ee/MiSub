@@ -199,9 +199,9 @@ watch(() => props.show, (newValue) => {
           </div>
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">访问订阅时刷新机场订阅</label>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">访问订阅时刷新机场订阅（全局默认）</label>
           <div class="mt-2 flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
-            <p class="text-sm text-gray-600 dark:text-gray-300">关闭后仅使用缓存内容，避免动态订阅过期导致失败</p>
+            <p class="text-sm text-gray-600 dark:text-gray-300">可在每个订阅编辑中单独覆盖</p>
             <label class="relative inline-flex items-center cursor-pointer">
               <input type="checkbox" v-model="settings.refreshUpstreamOnAccess" class="sr-only peer">
               <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-indigo-600"></div>

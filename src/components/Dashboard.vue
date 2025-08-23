@@ -265,7 +265,7 @@ const handleBulkImport = (importText) => {
 };
 const handleAddSubscription = () => {
   isNewSubscription.value = true;
-  editingSubscription.value = { name: '', url: '', enabled: true, exclude: '' }; // 新增 exclude
+  editingSubscription.value = { name: '', url: '', enabled: true, exclude: '', refreshOnAccess: undefined }; // 新增 exclude 与 refreshOnAccess 覆盖
   showSubModal.value = true;
 };
 const handleEditSubscription = (subId) => {
@@ -449,6 +449,16 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
       <div class="space-y-4">
         <div><label for="sub-edit-name" class="block text-sm font-medium text-gray-700 dark:text-gray-300">订阅名称</label><input type="text" id="sub-edit-name" v-model="editingSubscription.name" placeholder="（可选）不填将自动获取" class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-xs focus:outline-hidden focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm dark:text-white"></div>
         <div><label for="sub-edit-url" class="block text-sm font-medium text-gray-700 dark:text-gray-300">订阅链接</label><input type="text" id="sub-edit-url" v-model="editingSubscription.url" placeholder="https://..." class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-xs focus:outline-hidden focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm font-mono dark:text-white"></div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">访问时刷新该订阅（覆盖全局设置）</label>
+          <div class="mt-2 flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+            <p class="text-xs text-gray-600 dark:text-gray-300">不勾选将仅使用缓存内容</p>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" v-model="editingSubscription.refreshOnAccess" class="sr-only peer">
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-indigo-600"></div>
+            </label>
+          </div>
+        </div>
         <div>
           <label for="sub-edit-exclude" class="block text-sm font-medium text-gray-700 dark:text-gray-300">包含/排除节点</label>
           <textarea 

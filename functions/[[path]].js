@@ -890,7 +890,9 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
     const subPromises = httpSubs.map(async (sub) => {
         try {
             let text = '';
-            if (config.refreshUpstreamOnAccess === false) {
+            // 每个订阅可覆盖全局刷新设置
+            const effectiveRefresh = (sub.refreshOnAccess !== undefined) ? !!sub.refreshOnAccess : (config.refreshUpstreamOnAccess !== false);
+            if (!effectiveRefresh) {
                 // 仅使用缓存内容，不进行网络请求
                 if (sub.cachedRawText && typeof sub.cachedRawText === 'string' && sub.cachedRawText.length > 0) {
                     text = sub.cachedRawText;
