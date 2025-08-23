@@ -170,8 +170,7 @@ const defaultSettings = {
     prependSubName: true,
     NotifyThresholdDays: 3,
     NotifyThresholdPercent: 90,
-    storageType: 'kv', // 新增：数据存储类型，默认 KV，可选 'd1'
-    refreshUpstreamOnAccess: true // 新增：访问订阅时是否实时刷新机场订阅
+    storageType: 'kv' // 新增：数据存储类型，默认 KV，可选 'd1'
 };
 
 const formatBytes = (bytes, decimals = 2) => {
@@ -613,9 +612,9 @@ async function handleApiRequest(request, env) {
             if (!subUrl || typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
                 return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
             }
-            
+
             const result = { count: 0, userInfo: null };
-            
+
             try {
                 const fetchOptions = {
                     headers: { 'User-Agent': 'MiSub-Node-Counter/2.0' },
@@ -627,13 +626,13 @@ async function handleApiRequest(request, env) {
                     redirect: "follow",
                     cf: { insecureSkipVerify: true }
                 };
-                
+
                 const trafficRequest = fetch(new Request(subUrl, trafficFetchOptions));
                 const nodeCountRequest = fetch(new Request(subUrl, fetchOptions));
-                
+
                 // --- [核心修正] 使用 Promise.allSettled 替换 Promise.all ---
                 const responses = await Promise.allSettled([trafficRequest, nodeCountRequest]);
-                
+
                 // 1. 处理流量请求的结果
                 if (responses[0].status === 'fulfilled' && responses[0].value.ok) {
                     const trafficResponse = responses[0].value;
@@ -649,7 +648,7 @@ async function handleApiRequest(request, env) {
                 } else if (responses[0].status === 'rejected') {
                     console.error(`Traffic request for ${subUrl} rejected:`, responses[0].reason);
                 }
-                
+
                 // 2. 处理节点数请求的结果
                 if (responses[1].status === 'fulfilled' && responses[1].value.ok) {
                     const nodeCountResponse = responses[1].value;
@@ -676,7 +675,7 @@ async function handleApiRequest(request, env) {
                 } else if (responses[1].status === 'rejected') {
                     console.error(`Node count request for ${subUrl} rejected:`, responses[1].reason);
                 }
-                
+
                 // {{ AURA-X: Modify - 使用存储适配器优化节点计数更新. Approval: 寸止(ID:1735459200). }}
                 // 只有在至少获取到一个有效信息时，才更新数据库
                 if (result.userInfo || result.count > 0) {
@@ -684,19 +683,19 @@ async function handleApiRequest(request, env) {
                     const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
                     const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
                     const subToUpdate = allSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
-                    
+
                     if (subToUpdate) {
                         subToUpdate.nodeCount = result.count;
                         subToUpdate.userInfo = result.userInfo;
-                        
+
                         await storageAdapter.put(KV_KEY_SUBS, allSubs);
                     }
                 }
-                
+
             } catch (e) {
                 console.error(`[API Error /node_count] Unhandled exception for URL: ${subUrl}`, e);
             }
-            
+
             return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
         }
 
@@ -911,8 +910,8 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
     const subPromises = httpSubs.map(async (sub) => {
         try {
             let text = '';
-            // 每个订阅可覆盖全局刷新设置
-            const effectiveRefresh = (sub.refreshOnAccess !== undefined) ? !!sub.refreshOnAccess : (config.refreshUpstreamOnAccess !== false);
+            // 仅使用每个订阅自己的设置；未设置时默认开启刷新
+            const effectiveRefresh = (sub.refreshOnAccess !== undefined) ? !!sub.refreshOnAccess : true;
             if (!effectiveRefresh) {
                 // 仅使用缓存内容，不进行网络请求
                 if (sub.cachedRawText && typeof sub.cachedRawText === 'string' && sub.cachedRawText.length > 0) {

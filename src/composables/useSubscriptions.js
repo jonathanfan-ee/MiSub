@@ -24,7 +24,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
   }
 
   const enabledSubscriptions = computed(() => subscriptions.value.filter(s => s.enabled));
-  
+
   const totalRemainingTraffic = computed(() => {
     const REASONABLE_TRAFFIC_LIMIT_BYTES = 10 * 1024 * 1024 * 1024 * 1024 * 1024; // 10 PB in bytes
     return subscriptions.value.reduce((acc, sub) => {
@@ -33,7 +33,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
         sub.userInfo &&
         sub.userInfo.total > 0 &&
         sub.userInfo.total < REASONABLE_TRAFFIC_LIMIT_BYTES
-      ) {  
+      ) {
         const used = (sub.userInfo.upload || 0) + (sub.userInfo.download || 0);
         const remaining = sub.userInfo.total - used;
         return acc + Math.max(0, remaining);
@@ -57,16 +57,16 @@ export function useSubscriptions(initialSubsRef, markDirty) {
   async function handleUpdateNodeCount(subId, isInitialLoad = false) {
     const subToUpdate = subscriptions.value.find(s => s.id === subId);
     if (!subToUpdate || !subToUpdate.url.startsWith('http')) return;
-    
+
     if (!isInitialLoad) {
-        subToUpdate.isUpdating = true;
+      subToUpdate.isUpdating = true;
     }
 
     try {
       const data = await fetchNodeCount(subToUpdate.url, subToUpdate.id);
       subToUpdate.nodeCount = data.count || 0;
       subToUpdate.userInfo = data.userInfo || null;
-      
+
       if (!isInitialLoad) {
         showToast(`${subToUpdate.name || '订阅'} 更新成功！`, 'success');
         markDirty();
@@ -111,7 +111,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     subsCurrentPage.value = 1;
     markDirty();
   }
-  
+
   // {{ AURA-X: Modify - 使用批量更新API优化批量导入. Approval: 寸止(ID:1735459200). }}
   // [优化] 批量導入使用批量更新API，减少KV写入次数
   async function addSubscriptionsFromBulk(subs) {
@@ -146,7 +146,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
           showToast(`批量更新失败: ${result.message}`, 'error');
           // 降级到逐个更新
           showToast('正在降级到逐个更新模式...', 'info');
-          for(const sub of subsToUpdate) {
+          for (const sub of subsToUpdate) {
             await handleUpdateNodeCount(sub.id);
           }
         }
@@ -154,7 +154,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
         console.error('Batch update failed:', error);
         showToast('批量更新失败，正在降级到逐个更新...', 'error');
         // 降级到逐个更新
-        for(const sub of subsToUpdate) {
+        for (const sub of subsToUpdate) {
           await handleUpdateNodeCount(sub.id);
         }
       }
