@@ -672,8 +672,35 @@ async function handleApiRequest(request, env) {
                     } catch (cacheErr) {
                         console.error('[Cache] Failed to cache upstream text for', subUrl, cacheErr);
                     }
+                } else if (responses[1].status === 'fulfilled' && !responses[1].value.ok) {
+                    // 请求返回非 2xx，清空缓存以反映无节点
+                    try {
+                        const storageAdapter = await getStorageAdapter(env);
+                        const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
+                        const subToUpdateForCache = originalSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
+                        if (subToUpdateForCache) {
+                            subToUpdateForCache.cachedRawText = '';
+                            subToUpdateForCache.cachedAt = new Date().toISOString();
+                            await storageAdapter.put(KV_KEY_SUBS, originalSubs);
+                        }
+                    } catch (cacheErr) {
+                        console.error('[Cache] Failed to clear cache for', subUrl, cacheErr);
+                    }
                 } else if (responses[1].status === 'rejected') {
                     console.error(`Node count request for ${subUrl} rejected:`, responses[1].reason);
+                    // 抓取异常，清空缓存
+                    try {
+                        const storageAdapter = await getStorageAdapter(env);
+                        const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
+                        const subToUpdateForCache = originalSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
+                        if (subToUpdateForCache) {
+                            subToUpdateForCache.cachedRawText = '';
+                            subToUpdateForCache.cachedAt = new Date().toISOString();
+                            await storageAdapter.put(KV_KEY_SUBS, originalSubs);
+                        }
+                    } catch (cacheErr) {
+                        console.error('[Cache] Failed to clear cache for', subUrl, cacheErr);
+                    }
                 }
 
                 // {{ AURA-X: Modify - 使用存储适配器优化节点计数更新. Approval: 寸止(ID:1735459200). }}
@@ -781,15 +808,21 @@ async function handleApiRequest(request, env) {
                             const matches = decoded.match(nodeRegex);
                             sub.nodeCount = matches ? matches.length : 0;
 
-                            // 缓存原始上游文本，供访问时不刷新场景使用
+                            // 成功抓取时写入缓存
                             sub.cachedRawText = text;
                             sub.cachedAt = new Date().toISOString();
 
                             return { id: sub.id, success: true, nodeCount: sub.nodeCount };
                         } else {
+                            // 失败时清空缓存
+                            sub.cachedRawText = '';
+                            sub.cachedAt = new Date().toISOString();
                             return { id: sub.id, success: false, error: `HTTP ${response.status}` };
                         }
                     } catch (error) {
+                        // 异常时清空缓存
+                        sub.cachedRawText = '';
+                        sub.cachedAt = new Date().toISOString();
                         return { id: sub.id, success: false, error: error.message };
                     }
                 });
