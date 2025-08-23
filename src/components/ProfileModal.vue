@@ -256,17 +256,19 @@ const handleDeselectAll = (listName, sourceArray) => {
             </div>
         </div>
 
+        <!-- 订阅组作用域的“流量剩余”开关：放在列表上方，避免挤占两列布局 -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">显示“流量剩余”虚拟节点</label>
+          <div class="mt-2 flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+            <p class="text-sm text-gray-600 dark:text-gray-300">仅对该订阅组生效，覆盖全局设置</p>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" v-model="localProfile.showTrafficRemainingNode" class="sr-only peer">
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-indigo-600"></div>
+            </label>
+          </div>
+        </div>
+
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">显示“流量剩余”虚拟节点</label>
-              <div class="mt-2 flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
-                <p class="text-sm text-gray-600 dark:text-gray-300">仅对该订阅组生效，覆盖全局设置</p>
-                <label class="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" v-model="localProfile.showTrafficRemainingNode" class="sr-only peer">
-                  <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-indigo-600"></div>
-                </label>
-              </div>
-            </div>
 
             <div v-if="allSubscriptions.length > 0" class="space-y-2">
               <div class="flex justify-between items-center mb-2">
