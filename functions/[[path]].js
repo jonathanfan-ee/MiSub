@@ -644,29 +644,30 @@ async function handleApiRequest(request, env) {
                     if (lineMatches) {
                         result.count = lineMatches.length;
                     }
-                } else if (responses[1].status === 'rejected') {
-                    console.error(`Node count request for ${subUrl} rejected:`, responses[1].reason);
+                } else {
+                    // 包含兩種情況：請求被拒絕 或 響應非 2xx
+                    if (responses[1].status === 'rejected') {
+                        console.error(`Node count request for ${subUrl} rejected:`, responses[1].reason);
+                    }
+                    // 將節點數視為 0，並清空緩存文本
+                    result.count = 0;
+                    decodedText = '';
                 }
 
-                // {{ AURA-X: Modify - 使用存储适配器优化节点计数更新. Approval: 寸止(ID:1735459200). }}
-                // 只有在至少获取到一个有效信息时，才更新数据库
-                if (result.userInfo || result.count > 0) {
-                    const storageAdapter = await getStorageAdapter(env);
-                    const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                    const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
-                    const subToUpdate = allSubs.find(s => s.url === subUrl);
+                // 始終更新：即使節點數為 0 或請求失敗，也更新 nodeCount 與緩存
+                const storageAdapter = await getStorageAdapter(env);
+                const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
+                const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
+                const subToUpdate = allSubs.find(s => s.url === subUrl);
 
-                    if (subToUpdate) {
-                        subToUpdate.nodeCount = result.count;
-                        subToUpdate.userInfo = result.userInfo;
-                        if (decodedText && decodedText.length > 0) {
-                            subToUpdate.cachedRaw = decodedText;
-                            subToUpdate.cachedAt = Date.now();
-                            subToUpdate.cachedFromUrl = subUrl;
-                        }
+                if (subToUpdate) {
+                    subToUpdate.nodeCount = result.count;
+                    subToUpdate.userInfo = result.userInfo;
+                    subToUpdate.cachedRaw = typeof decodedText === 'string' ? decodedText : (subToUpdate.cachedRaw || '');
+                    subToUpdate.cachedAt = Date.now();
+                    subToUpdate.cachedFromUrl = subUrl;
 
-                        await storageAdapter.put(KV_KEY_SUBS, allSubs);
-                    }
+                    await storageAdapter.put(KV_KEY_SUBS, allSubs);
                 }
 
             } catch (e) {
