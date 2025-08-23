@@ -659,7 +659,7 @@ async function handleApiRequest(request, env) {
                     if (lineMatches) {
                         result.count = lineMatches.length;
                     }
-                    // 缓存原始上游文本
+                    // 成功抓取时，缓存原始上游文本供后续不刷新访问使用
                     try {
                         const storageAdapter = await getStorageAdapter(env);
                         const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
@@ -677,17 +677,15 @@ async function handleApiRequest(request, env) {
                 }
 
                 // {{ AURA-X: Modify - 使用存储适配器优化节点计数更新. Approval: 寸止(ID:1735459200). }}
-                // 只有在至少获取到一个有效信息时，才更新数据库
-                if (result.userInfo || result.count > 0) {
+                // 无论是否获取到有效信息，都持久化最新的 nodeCount/userInfo，使前端与聚合输出一致
+                {
                     const storageAdapter = await getStorageAdapter(env);
                     const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
                     const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
                     const subToUpdate = allSubs.find(s => (subId ? s.id === subId : s.url === subUrl));
-
                     if (subToUpdate) {
                         subToUpdate.nodeCount = result.count;
                         subToUpdate.userInfo = result.userInfo;
-
                         await storageAdapter.put(KV_KEY_SUBS, allSubs);
                     }
                 }
