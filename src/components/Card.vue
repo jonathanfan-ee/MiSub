@@ -110,6 +110,20 @@ const cachePreview = computed(() => {
   return decoded.length > 2000 ? decoded.slice(0, 2000) + '\n...（已截断）' : decoded;
 });
 
+const cachedLinesCount = computed(() => {
+  const raw = props.misub.cachedRaw || '';
+  const present = props.misub.cachedRawPresent ?? (raw && raw.length > 0);
+  if (!present) return null;
+  const decoded = decodeMaybeBase64ToUtf8(raw);
+  const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//m;
+  const count = decoded
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => nodeRegex.test(l)).length;
+  return count;
+});
+
 const copyCache = async () => {
   try {
     await navigator.clipboard.writeText(props.misub.cachedRaw || '');
@@ -147,6 +161,7 @@ const copyCache = async () => {
         <span :class="(misub.cachedRawPresent ?? (misub.cachedRaw && misub.cachedRaw.length > 0)) ? 'text-green-600 dark:text-green-400' : 'text-gray-400'">
           {{ (misub.cachedRawPresent ?? (misub.cachedRaw && misub.cachedRaw.length > 0)) ? '缓存可用' : '无缓存' }}
         </span>
+        <span v-if="cachedLinesCount !== null" class="text-gray-400">· {{ cachedLinesCount }} 行</span>
         <span v-if="misub.cachedAt" class="text-gray-400">· {{ new Date(misub.cachedAt).toLocaleString() }}</span>
       </div>
       <div v-if="trafficInfo" class="space-y-1 pt-1">
