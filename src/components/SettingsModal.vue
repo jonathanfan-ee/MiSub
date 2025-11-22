@@ -27,6 +27,7 @@ const hasWhitespace = computed(() => {
     'subConfig',
     'BotToken',
     'ChatID',
+    // 注意：clashMetaTemplateUrl 不检查，因为 URL 可能包含空格（虽然不推荐）
   ];
 
   for (const key of fieldsToCkeck) {
@@ -174,6 +175,66 @@ watch(() => props.show, (newValue) => {
             class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-xs focus:outline-hidden focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm dark:text-white"
           >
         </div>
+        
+        <!-- Clash Meta 直接生成模式 -->
+        <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+          <h4 class="text-md font-semibold text-gray-800 dark:text-white mb-3">🚀 Clash Meta 直接生成模式</h4>
+          <div class="space-y-4">
+            <!-- 启用直接生成模式 -->
+            <div class="flex items-center justify-between p-3 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 rounded-lg">
+              <div>
+                <p class="text-sm font-medium text-gray-700 dark:text-gray-200">启用直接生成 Clash Meta YAML</p>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">跳过 subconverter，直接生成适配 Clash Meta 的配置</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" v-model="settings.useDirectClashMeta" class="sr-only peer">
+                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-purple-600"></div>
+              </label>
+            </div>
+            
+            <!-- 模板 URL -->
+            <div>
+              <label for="clashMetaTemplateUrl" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Clash Meta 模板 URL
+                <span class="text-xs text-gray-500 ml-1">(可选)</span>
+              </label>
+              <input 
+                type="text" 
+                id="clashMetaTemplateUrl" 
+                v-model="settings.clashMetaTemplateUrl"
+                placeholder="https://gist.githubusercontent.com/.../clash-meta-template.yaml"
+                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-xs focus:outline-hidden focus:ring-purple-500 focus:border-purple-500 sm:text-sm dark:text-white"
+              >
+              <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                留空使用内置默认模板。推荐将模板上传到 GitHub Gist 并填入 Raw URL。
+              </p>
+            </div>
+            
+            <!-- 自动插入节点 -->
+            <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+              <div>
+                <p class="text-sm text-gray-700 dark:text-gray-200">自动插入节点到选择组</p>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">自动将节点插入到 select 类型的代理组中</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" v-model="settings.autoInsertToSelect" class="sr-only peer">
+                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-purple-600"></div>
+              </label>
+            </div>
+            
+            <!-- 提示信息 -->
+            <div v-if="settings.useDirectClashMeta" class="p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
+              <p class="text-xs text-green-700 dark:text-green-300">
+                ✅ 已启用直接生成模式！Clash Meta 用户将获得：<br>
+                • 更快的响应速度（跳过第三方服务）<br>
+                • 更好的兼容性（完整支持 Meta 新特性）<br>
+                • 完全自定义（使用你自己的配置模板）<br>
+                • 查看完整文档：<code class="text-xs bg-green-100 dark:bg-green-900 px-1 rounded">CLASH_META_DIRECT_MODE.md</code>
+              </p>
+            </div>
+          </div>
+        </div>
+
          <div>
           <label for="tgBotToken" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Telegram Bot Token</label>
           <input 

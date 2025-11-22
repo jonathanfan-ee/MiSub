@@ -1,0 +1,285 @@
+# Clash Meta 配置模板
+# 基于 https://gist.github.com/liuran001/5ca84f7def53c70b554d3f765ff86a33
+# 适配 MiSub 直接生成模式
+
+# ========== 基础配置 ==========
+mixed-port: 7890
+allow-lan: true
+bind-address: '*'
+mode: rule
+log-level: info
+ipv6: true
+external-controller: 127.0.0.1:9090
+external-ui: ui
+external-ui-url: 'https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip'
+
+# ========== 性能优化 ==========
+unified-delay: true
+tcp-concurrent: true
+geodata-mode: true
+geox-url:
+  geoip: 'https://mirror.ghproxy.com/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat'
+  geosite: 'https://mirror.ghproxy.com/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat'
+  mmdb: 'https://mirror.ghproxy.com/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb'
+  asn: 'https://mirror.ghproxy.com/https://github.com/xishang0128/geoip/releases/download/latest/GeoLite2-ASN.mmdb'
+
+# ========== 缓存与存储 ==========
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+# ========== 流量嗅探 ==========
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  parse-pure-ip: true
+  override-destination: false
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+
+# ========== DNS 配置 ==========
+dns:
+  enable: true
+  prefer-h3: true
+  listen: 0.0.0.0:1053
+  ipv6: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - '*.lan'
+    - '*.localdomain'
+    - '*.example'
+    - '*.invalid'
+    - '*.localhost'
+    - '*.test'
+    - '*.local'
+    - '*.home.arpa'
+    - '+.msftconnecttest.com'
+    - '+.msftncsi.com'
+    - 'localhost.ptlogin2.qq.com'
+    - '+.srv.nintendo.net'
+    - '+.stun.playstation.net'
+    - 'xbox.*.microsoft.com'
+    - '+.xboxlive.com'
+    - 'stun.*'
+    - 'global.turn.twilio.com'
+    - 'global.stun.twilio.com'
+    - '+.qq.com'
+    - '+.music.163.com'
+    - '*.music.126.net'
+    - '+.ntp.org.cn'
+    - '+.pool.ntp.org'
+    - 'time.*.com'
+    - 'ntp.*.com'
+    - '+.time.edu.cn'
+  
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+    - system
+  
+  nameserver:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+  
+  nameserver-policy:
+    'geosite:cn,private':
+      - https://doh.pub/dns-query
+      - https://dns.alidns.com/dns-query
+
+# ========== 代理节点 ==========
+# 此部分将由 MiSub 自动填充
+proxies: []
+
+# ========== 代理组 ==========
+proxy-groups:
+  # 主选择组
+  - name: Proxies
+    type: select
+    proxies:
+      # 节点将自动插入到这里
+      - 直连
+  
+  # 备用组
+  - name: 备用
+    type: select
+    proxies:
+      # 节点将自动插入到这里
+
+  # AI 平台
+  - name: AI平台
+    type: select
+    proxies:
+      - Proxies
+      - 备用
+      - 直连
+
+  # Microsoft（默认直连，需要时可切换代理）
+  - name: Microsoft
+    type: select
+    proxies:
+      - 直连
+      - Proxies
+      - 备用
+
+  # Apple
+  - name: Apple
+    type: select
+    proxies:
+      - 直连
+      - Proxies
+      - 备用
+
+  # Google
+  - name: Google
+    type: select
+    proxies:
+      - Proxies
+      - 备用
+      - 直连
+
+  # TikTok
+  - name: Tiktok
+    type: select
+    proxies:
+      - Proxies
+      - 备用
+      - 直连
+
+  # 流媒体
+  - name: 流媒体
+    type: select
+    proxies:
+      - Proxies
+      - 备用
+      - 直连
+
+  # Steam
+  - name: Steam
+    type: select
+    proxies:
+      - Proxies
+      - 直连
+      - 备用
+
+  # 加密货币
+  - name: Crypto
+    type: select
+    proxies:
+      - Proxies
+      - 备用
+      - 直连
+
+  # 领英
+  - name: 领英
+    type: select
+    proxies:
+      - Proxies
+      - 直连
+      - 备用
+
+  # 工作学习（Github, OneDrive, Kickstarter 等）
+  - name: 工作学习
+    type: select
+    proxies:
+      - Proxies
+      - 备用
+      - 直连
+
+  # 去广告
+  - name: 去广告
+    type: select
+    proxies:
+      - REJECT
+      - 直连
+      - Proxies
+
+  # 直连
+  - name: 直连
+    type: select
+    proxies:
+      - DIRECT
+
+  # 最终兜底
+  - name: Final
+    type: select
+    proxies:
+      - Proxies
+      - 备用
+      - 直连
+
+# ========== 分流规则 ==========
+rules:
+  # 1. 局域网和特殊端口（高频）
+  - DOMAIN-SUFFIX,local,直连
+  - DOMAIN-SUFFIX,localhost,直连
+  - DOMAIN-SUFFIX,lan,直连
+  - DOMAIN-SUFFIX,home.arpa,直连
+  - DST-PORT,1900,直连
+  - DST-PORT,5353,直连
+  - DOMAIN-SUFFIX,vrdesktop.net,直连
+  - IP-CIDR,127.0.0.0/8,直连,no-resolve
+  - IP-CIDR,10.0.0.0/8,直连,no-resolve
+  - IP-CIDR,172.16.0.0/12,直连,no-resolve
+  - IP-CIDR,192.168.0.0/16,直连,no-resolve
+  - IP-CIDR,169.254.0.0/16,直连,no-resolve
+  - IP-CIDR,224.0.0.0/4,直连,no-resolve
+  - IP-CIDR,240.0.0.0/4,直连,no-resolve
+  - IP-CIDR,fe80::/10,直连,no-resolve
+  - IP-CIDR,fd00::/8,直连,no-resolve
+
+  # 2. 去广告（高频）
+  - GEOSITE,category-ads-all,去广告
+
+  # 3. AI 平台（中频）
+  - GEOSITE,category-ai-chat-!cn,AI平台
+
+  # 4. 工作学习（从 Microsoft 拆分 + Kickstarter）
+  - GEOSITE,github,工作学习
+  - GEOSITE,microsoft-dev,工作学习
+  - GEOSITE,onedrive,工作学习
+  - GEOSITE,xbox,工作学习
+  - DOMAIN-SUFFIX,yammer.com,工作学习
+  - DOMAIN-SUFFIX,kickstarter.com,工作学习
+  - DOMAIN-SUFFIX,metacdn.com,工作学习
+
+  # 5. 流媒体
+  - GEOSITE,netflix,流媒体
+  - DOMAIN-SUFFIX,cf.imetyou.top,流媒体
+
+  # 6. 厂商/平台
+  # Microsoft（此规则只匹配应直连的 Microsoft 服务）
+  - GEOSITE,microsoft,Microsoft
+  
+  # Apple
+  - GEOSITE,apple,Apple
+  
+  # Google
+  - GEOSITE,google,Google
+  
+  # TikTok
+  - GEOSITE,tiktok,Tiktok
+
+  # 7. 游戏
+  - GEOSITE,steam,Steam
+
+  # 8. 领英
+  - DOMAIN-SUFFIX,linkedin.com,领英
+
+  # 9. 加密货币
+  - GEOSITE,category-cryptocurrency,Crypto
+  - DOMAIN-SUFFIX,four.meme,Crypto
+
+  # 10. 国内直连（高频）
+  - GEOSITE,cn,直连
+  - GEOIP,CN,直连
+
+  # 11. 兜底规则
+  - MATCH,Final
+

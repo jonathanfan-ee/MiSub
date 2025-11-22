@@ -1,5 +1,6 @@
 import yaml from 'js-yaml';
 import { StorageFactory, DataMigrator, STORAGE_TYPES } from './storage-adapter.js';
+import { generateClashMetaYAML } from './clash-meta-generator.js';
 
 const OLD_KV_KEY = 'misub_data_v1';
 const KV_KEY_SUBS = 'misub_subscriptions_v1';
@@ -169,11 +170,15 @@ const defaultSettings = {
     subConfig: 'https://raw.githubusercontent.com/cmliu/ACL4SSR/refs/heads/main/Clash/config/ACL4SSR_Online_Full.ini',
     prependSubName: true, // 兼容旧字段
     prependSubNameSubs: true, // 是否给机场订阅节点添加订阅名前缀
-    prependSubNameManual: false, // 是否给手动节点添加“手动节点”前缀
+    prependSubNameManual: false, // 是否给手动节点添加"手动节点"前缀
     NotifyThresholdDays: 3,
     NotifyThresholdPercent: 90,
     storageType: 'kv', // 新增：数据存储类型，默认 KV，可选 'd1'
-    showTrafficRemainingNode: true, // 是否在聚合顶部插入“流量剩余”虚拟节点
+    showTrafficRemainingNode: true, // 是否在聚合顶部插入"流量剩余"虚拟节点
+    // 新增：Clash Meta 直接生成模式
+    useDirectClashMeta: false, // 是否直接生成 Clash Meta YAML（跳过 subconverter）
+    clashMetaTemplateUrl: '', // Clash Meta 模板 URL（留空则使用内置默认模板）
+    autoInsertToSelect: true, // 是否自动将节点插入到 select 类型的代理组
     // manualNodesPosition: 已废弃，由统一排序控制
 };
 
@@ -1240,6 +1245,7 @@ async function handleMisubRequest(context) {
         lines.push('# MiSub Debug Report');
         lines.push(`Target: ${profileIdentifier ? 'profile' : 'default'}`);
         lines.push(`Items: ${targetMisubs.length}`);
+        lines.push(`Direct Clash Meta Mode: ${config.useDirectClashMeta ? 'ON' : 'OFF'}`);
         if (debugCollector) {
             debugCollector.forEach(d => {
                 lines.push(`- ${d.name || d.id}: source=${d.usedSource}${d.realtimeFetch ? '(live-on)' : '(live-off)'} input=${d.inputCount} output=${d.outputCount}`);
@@ -1250,6 +1256,52 @@ async function handleMisubRequest(context) {
         lines.push(combinedNodeList);
         const headers = { "Content-Type": "text/plain; charset=utf-8", 'Cache-Control': 'no-store, no-cache' };
         return new Response(lines.join('\n'), { headers });
+    }
+
+    // === 新增：Clash Meta 直接生成模式 ===
+    // 如果启用了直接生成模式且目标格式是 clash，直接生成 YAML 配置
+    if (targetFormat === 'clash' && config.useDirectClashMeta) {
+        try {
+            // 获取节点链接数组
+            const nodeLinks = combinedNodeList.split('\n').filter(l => l.trim());
+
+            // 获取模板配置
+            let templateConfig = null;
+            if (config.clashMetaTemplateUrl && config.clashMetaTemplateUrl.trim() !== '') {
+                try {
+                    const templateResponse = await fetch(config.clashMetaTemplateUrl, {
+                        headers: { 'User-Agent': 'MiSub-ClashMeta-Generator/1.0' }
+                    });
+                    if (templateResponse.ok) {
+                        const templateText = await templateResponse.text();
+                        templateConfig = yaml.load(templateText);
+                    } else {
+                        console.warn('[ClashMeta] Failed to fetch template, using default');
+                    }
+                } catch (error) {
+                    console.error('[ClashMeta] Error fetching template:', error);
+                }
+            }
+
+            // 生成 Clash Meta YAML 配置
+            const yamlConfig = await generateClashMetaYAML(nodeLinks, templateConfig, {
+                autoInsertToSelect: config.autoInsertToSelect
+            });
+
+            // 返回配置
+            const headers = {
+                "Content-Type": "text/yaml; charset=utf-8",
+                "Content-Disposition": `attachment; filename*=utf-8''${encodeURIComponent(subName)}.yaml`,
+                'Cache-Control': 'no-store, no-cache'
+            };
+
+            return new Response(yamlConfig, { headers });
+
+        } catch (error) {
+            console.error('[ClashMeta] Direct generation failed:', error);
+            // 如果直接生成失败，降级到 subconverter 模式
+            console.log('[ClashMeta] Fallback to subconverter mode');
+        }
     }
 
     if (targetFormat === 'base64') {
