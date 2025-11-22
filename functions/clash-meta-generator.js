@@ -75,24 +75,47 @@ export async function generateClashMetaYAML(nodeLinks, templateConfig, settings 
         // 4. 设置代理列表
         config.proxies = proxies;
 
-        // 5. 自动插入节点到代理组
+        // 5. 处理代理组 - 支持 filter 字段的智能筛选
         if (config['proxy-groups']) {
             config['proxy-groups'].forEach(group => {
-                if (group.proxies) {
-                    // 替换占位符或自动插入
-                    const index = group.proxies.indexOf('__AUTO_INSERT_NODES__');
-                    if (index !== -1) {
-                        group.proxies.splice(index, 1, ...proxyNames);
-                    } else if (settings.autoInsertToSelect && group.type === 'select') {
-                        // 在 select 类型的组中自动插入节点（在固定选项之后）
-                        const fixedOptions = ['DIRECT', 'REJECT'];
-                        const lastFixedIndex = Math.max(
-                            ...fixedOptions.map(opt => group.proxies.indexOf(opt))
-                        );
-                        if (lastFixedIndex >= 0) {
-                            group.proxies.splice(lastFixedIndex + 1, 0, ...proxyNames);
+                // 如果组定义了 filter 字段，使用筛选逻辑
+                if (group.filter) {
+                    const filterRegex = new RegExp(group.filter, 'i');
+                    const filteredNodes = proxyNames.filter(name => filterRegex.test(name));
+                    
+                    // 如果有 proxies 字段，将筛选后的节点插入
+                    if (group.proxies) {
+                        const index = group.proxies.indexOf('__AUTO_INSERT_NODES__');
+                        if (index !== -1) {
+                            group.proxies.splice(index, 1, ...filteredNodes);
                         } else {
-                            group.proxies.push(...proxyNames);
+                            // 如果没有占位符，追加到末尾
+                            group.proxies.push(...filteredNodes);
+                        }
+                    } else {
+                        // 如果没有 proxies 字段，创建一个
+                        group.proxies = filteredNodes;
+                    }
+                    
+                    // 移除 filter 字段（Clash Meta 不支持在 proxies 模式下使用）
+                    delete group.filter;
+                } else {
+                    // 没有 filter 字段，使用原有的占位符逻辑
+                    if (group.proxies) {
+                        const index = group.proxies.indexOf('__AUTO_INSERT_NODES__');
+                        if (index !== -1) {
+                            group.proxies.splice(index, 1, ...proxyNames);
+                        } else if (settings.autoInsertToSelect && group.type === 'select') {
+                            // 在 select 类型的组中自动插入节点（在固定选项之后）
+                            const fixedOptions = ['DIRECT', 'REJECT'];
+                            const lastFixedIndex = Math.max(
+                                ...fixedOptions.map(opt => group.proxies.indexOf(opt))
+                            );
+                            if (lastFixedIndex >= 0) {
+                                group.proxies.splice(lastFixedIndex + 1, 0, ...proxyNames);
+                            } else {
+                                group.proxies.push(...proxyNames);
+                            }
                         }
                     }
                 }
