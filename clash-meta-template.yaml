@@ -99,106 +99,121 @@ proxies: []
 
 # ========== 代理组 ==========
 proxy-groups:
-  # 主选择组
+  # 主选择组（筛选包含"自建"的节点）
   - name: Proxies
     type: select
+    filter: "自建"  # 正则表达式，筛选节点名称包含"自建"的节点
     proxies:
-      # 节点将自动插入到这里
+      - 备用
+      - __AUTO_INSERT_NODES__  # 筛选后的节点会插入到这里
       - 直连
   
-  # 备用组
+  # 备用组（筛选包含"备用"的节点）
   - name: 备用
     type: select
+    filter: "备用"  # 正则表达式，筛选节点名称包含"备用"的节点
     proxies:
-      # 节点将自动插入到这里
+      - __AUTO_INSERT_NODES__
 
-  # AI 平台
+  # AI 平台（包含所有节点）
   - name: AI平台
     type: select
+    # filter: ".*"  # 包含所有节点，不需要filter字段
     proxies:
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
       - 直连
 
-  # Microsoft（默认直连，需要时可切换代理）
+  # Microsoft（默认直连，包含所有节点供切换）
   - name: Microsoft
     type: select
     proxies:
       - 直连
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
 
-  # Apple
+  # Apple（默认直连，包含所有节点供切换）
   - name: Apple
     type: select
     proxies:
       - 直连
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
 
-  # Google
+  # Google（包含所有节点）
   - name: Google
     type: select
     proxies:
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
       - 直连
 
-  # TikTok
+  # TikTok（包含所有节点）
   - name: Tiktok
     type: select
     proxies:
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
       - 直连
 
-  # 流媒体
+  # 流媒体（包含所有节点）
   - name: 流媒体
     type: select
     proxies:
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
       - 直连
 
-  # Steam
+  # Steam（包含所有节点）
   - name: Steam
     type: select
     proxies:
       - Proxies
       - 直连
       - 备用
+      - __AUTO_INSERT_NODES__
 
-  # 加密货币
+  # 加密货币（包含所有节点）
   - name: Crypto
     type: select
     proxies:
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
       - 直连
 
-  # 领英
+  # 领英（包含所有节点）
   - name: 领英
     type: select
     proxies:
       - Proxies
       - 直连
       - 备用
+      - __AUTO_INSERT_NODES__
 
-  # 工作学习（Github, OneDrive, Kickstarter 等）
+  # 工作学习（包含所有节点）
   - name: 工作学习
     type: select
     proxies:
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
       - 直连
 
-  # 去广告
+  # 去广告（包含备用组）
   - name: 去广告
     type: select
     proxies:
       - REJECT
       - 直连
       - Proxies
+      - 备用
 
   # 直连
   - name: 直连
@@ -206,12 +221,13 @@ proxy-groups:
     proxies:
       - DIRECT
 
-  # 最终兜底
+  # 最终兜底（包含所有节点）
   - name: Final
     type: select
     proxies:
       - Proxies
       - 备用
+      - __AUTO_INSERT_NODES__
       - 直连
 
 # ========== 分流规则 ==========
