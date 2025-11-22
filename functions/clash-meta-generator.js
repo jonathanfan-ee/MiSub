@@ -33,6 +33,8 @@ export async function convertLinksToClashProxies(nodeLinks) {
                 proxy = parseHysteria2(trimmed);
             } else if (trimmed.startsWith('hysteria://') || trimmed.startsWith('hy://')) {
                 proxy = parseHysteria(trimmed);
+            } else if (trimmed.startsWith('tuic://')) {
+                proxy = parseTuic(trimmed);
             }
 
             if (proxy) {
@@ -552,6 +554,79 @@ function parseHysteria(link) {
     if (params.get('upmbps')) proxy.up = params.get('upmbps');
     if (params.get('downmbps')) proxy.down = params.get('downmbps');
     if (params.get('obfs')) proxy.obfs = params.get('obfs');
+
+    return proxy;
+}
+
+/**
+ * 解析 TUIC 链接
+ */
+function parseTuic(link) {
+    // tuic://uuid:password@server:port?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=example.com#name
+    const url = new URL(link);
+    const server = url.hostname;
+    const port = parseInt(url.port) || 443;
+    const name = url.hash ? decodeURIComponent(url.hash.substring(1)) : `${server}:${port}`;
+    
+    // 解析 uuid 和 password
+    const userInfo = url.username;
+    let uuid = '';
+    let password = '';
+    
+    if (userInfo) {
+        // 如果有密码，格式是 uuid:password
+        const colonIndex = userInfo.indexOf(':');
+        if (colonIndex !== -1) {
+            uuid = decodeURIComponent(userInfo.substring(0, colonIndex));
+            password = decodeURIComponent(url.password || '');
+        } else {
+            // 只有 uuid，没有密码
+            uuid = decodeURIComponent(userInfo);
+        }
+    }
+
+    const params = url.searchParams;
+
+    const proxy = {
+        name,
+        type: 'tuic',
+        server,
+        port,
+        uuid,
+        password: password || undefined,
+        udp: true
+    };
+
+    // 可选参数
+    if (params.get('congestion_control') || params.get('congestion-control')) {
+        proxy['congestion-controller'] = params.get('congestion_control') || params.get('congestion-control');
+    }
+    
+    if (params.get('udp_relay_mode') || params.get('udp-relay-mode')) {
+        proxy['udp-relay-mode'] = params.get('udp_relay_mode') || params.get('udp-relay-mode');
+    }
+    
+    if (params.get('alpn')) {
+        const alpn = params.get('alpn');
+        proxy.alpn = alpn.includes(',') ? alpn.split(',') : [alpn];
+    }
+    
+    if (params.get('sni')) {
+        proxy.sni = params.get('sni');
+    }
+    
+    if (params.get('disable_sni') === '1' || params.get('disable-sni') === '1') {
+        proxy['disable-sni'] = true;
+    }
+    
+    if (params.get('insecure') === '1' || params.get('skip_cert_verify') === '1') {
+        proxy['skip-cert-verify'] = true;
+    }
+
+    // TUIC v5 特有参数
+    if (params.get('reduce_rtt') === '1' || params.get('reduce-rtt') === '1') {
+        proxy['reduce-rtt'] = true;
+    }
 
     return proxy;
 }
