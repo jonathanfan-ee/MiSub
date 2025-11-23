@@ -366,14 +366,29 @@ function parseVmess(link) {
  */
 function parseShadowsocks(link) {
     // ss://method:password@server:port#name
-    // 或 ss://base64(method:password)@server:port#name
+    // 或 ss://base64(method:password)@server:port/?plugin=xxx#name
     
     let server, port, method, password, name;
+    let pluginStr = '';
     
+    // 提取 name (# 后面的部分)
     const hashIndex = link.indexOf('#');
     name = hashIndex !== -1 ? decodeURIComponent(link.substring(hashIndex + 1)) : '';
-    const mainPart = hashIndex !== -1 ? link.substring(5, hashIndex) : link.substring(5);
+    let linkWithoutName = hashIndex !== -1 ? link.substring(0, hashIndex) : link;
     
+    // 提取 plugin 参数 (? 后面的部分)
+    const questionIndex = linkWithoutName.indexOf('/?');
+    if (questionIndex !== -1) {
+        const queryString = linkWithoutName.substring(questionIndex + 2);
+        linkWithoutName = linkWithoutName.substring(0, questionIndex);
+        
+        // 解析查询参数
+        const params = new URLSearchParams(queryString);
+        pluginStr = params.get('plugin') || '';
+    }
+    
+    // 移除 ss:// 前缀
+    const mainPart = linkWithoutName.substring(5);
     const atIndex = mainPart.indexOf('@');
     
     if (atIndex !== -1) {
@@ -411,7 +426,7 @@ function parseShadowsocks(link) {
     
     if (!name) name = `${server}:${port}`;
 
-    return {
+    const proxy = {
         name,
         type: 'ss',
         server,
@@ -420,6 +435,56 @@ function parseShadowsocks(link) {
         password,
         udp: true
     };
+
+    // 解析 plugin 参数
+    if (pluginStr) {
+        // plugin 格式: obfs-local;obfs=http;obfs-host=xxx
+        // 或: v2ray-plugin;mode=websocket;tls;host=xxx
+        const pluginParts = pluginStr.split(';');
+        const pluginName = pluginParts[0];
+        
+        if (pluginName.includes('obfs')) {
+            // simple-obfs 插件
+            proxy.plugin = 'obfs';
+            proxy['plugin-opts'] = {};
+            
+            pluginParts.slice(1).forEach(part => {
+                const [key, value] = part.split('=');
+                if (key && value) {
+                    if (key === 'obfs') {
+                        proxy['plugin-opts'].mode = value; // http 或 tls
+                    } else if (key === 'obfs-host') {
+                        proxy['plugin-opts'].host = value;
+                    } else if (key === 'obfs-uri') {
+                        proxy['plugin-opts'].path = value;
+                    }
+                }
+            });
+        } else if (pluginName.includes('v2ray')) {
+            // v2ray-plugin 插件
+            proxy.plugin = 'v2ray-plugin';
+            proxy['plugin-opts'] = {};
+            
+            pluginParts.slice(1).forEach(part => {
+                if (part === 'tls') {
+                    proxy['plugin-opts'].tls = true;
+                } else {
+                    const [key, value] = part.split('=');
+                    if (key && value) {
+                        if (key === 'mode') {
+                            proxy['plugin-opts'].mode = value;
+                        } else if (key === 'host') {
+                            proxy['plugin-opts'].host = value;
+                        } else if (key === 'path') {
+                            proxy['plugin-opts'].path = value;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    return proxy;
 }
 
 /**
