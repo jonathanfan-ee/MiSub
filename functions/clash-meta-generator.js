@@ -569,21 +569,10 @@ function parseTuic(link) {
     const name = url.hash ? decodeURIComponent(url.hash.substring(1)) : `${server}:${port}`;
     
     // 解析 uuid 和 password
-    const userInfo = url.username;
-    let uuid = '';
-    let password = '';
-    
-    if (userInfo) {
-        // 如果有密码，格式是 uuid:password
-        const colonIndex = userInfo.indexOf(':');
-        if (colonIndex !== -1) {
-            uuid = decodeURIComponent(userInfo.substring(0, colonIndex));
-            password = decodeURIComponent(url.password || '');
-        } else {
-            // 只有 uuid，没有密码
-            uuid = decodeURIComponent(userInfo);
-        }
-    }
+    // URL 格式：tuic://uuid:password@server:port
+    // url.username = uuid, url.password = password
+    const uuid = url.username ? decodeURIComponent(url.username) : '';
+    const password = url.password ? decodeURIComponent(url.password) : '';
 
     const params = url.searchParams;
 
@@ -593,9 +582,13 @@ function parseTuic(link) {
         server,
         port,
         uuid,
-        password: password || undefined,
         udp: true
     };
+
+    // 只有密码存在时才添加
+    if (password) {
+        proxy.password = password;
+    }
 
     // 可选参数
     if (params.get('congestion_control') || params.get('congestion-control')) {
