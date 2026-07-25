@@ -9,8 +9,8 @@
 
 ## 一、更新已有部署
 
-现有站点通过 **Git 连接自动部署**：代码推到 `main` 分支后 Cloudflare Pages 会自动构建并上线，
-不需要手动操作。
+现有站点 **https://misub.hjagi.cc**（Pages 项目 `misub`）通过 **Git 连接自动部署**：
+代码推到 `main` 分支后 Cloudflare Pages 会自动构建并上线，不需要手动操作。
 
 ```bash
 git push origin main
@@ -54,73 +54,145 @@ Cloudflare Pages Functions **不支持** cron 触发器 —— `wrangler.toml` �
 
 目标：**完全独立的 KV + D1**，客户的数据和你自己的互不影响。
 
-下面每一步都要用**和现有项目不同的名字**，避免混淆。假设客户项目叫 `misub-clienta`。
+### 本次要开的这一套（实际取值）
+
+| 项目 | 你自己的（已存在） | 客户版（要新建） |
+| --- | --- | --- |
+| Pages 项目名 | `misub` | **`misubfu`** |
+| 访问域名 | `misub.hjagi.cc` | **`misubfu.hjagi.cc`** |
+| KV 命名空间 | `MISUB_KV` | **`MISUBFU_KV`** |
+| D1 数据库 | `misub-database` | **`misubfu-database`** |
+| 绑定变量名 | `MISUB_KV` / `MISUB_DB` | `MISUB_KV` / `MISUB_DB` ← **两边一样，代码里读的就是这两个名字** |
+| `ADMIN_PASSWORD` | 你自己的 | **另设一个** |
+| `COOKIE_SECRET` | 你自己的 | **另生成一个** |
+
+> 关键点：**绑定的「变量名」两边必须相同**（`MISUB_KV` / `MISUB_DB`），
+> 区分两套部署的是「变量名指向哪个资源」。这一点很容易搞反。
+
+下面每一步都要用**和现有项目不同的资源名**，避免混淆。
 
 ### 步骤 1：创建独立的 KV 命名空间
 
+两种做法都行，选一种：
+
+**做法 A：命令行**
+
 ```bash
-npx wrangler login          # 首次使用需要授权
-npx wrangler kv namespace create MISUB_KV_CLIENTA
+npx wrangler login          # 首次使用需要授权（会打开浏览器）
+npx wrangler kv namespace create MISUBFU_KV
 ```
 
 记下输出的 `id`。
 
+**做法 B：控制台**
+
+`Workers & Pages` → 左侧 `KV` → `创建命名空间` → 名称填 `MISUBFU_KV`。
+
 ### 步骤 2：创建独立的 D1 数据库并建表
 
-```bash
-npx wrangler d1 create misub-clienta
-```
-
-记下输出的 `database_id`，然后初始化表结构（**必须带 `--remote`**，否则只会写到本地
-sqlite 文件，线上数据库还是空的）：
+**做法 A：命令行**
 
 ```bash
-npx wrangler d1 execute misub-clienta --file=schema.sql --remote
-```
+npx wrangler d1 create misubfu-database
 
-验证建表成功：
+# 初始化表结构 —— 必须带 --remote，否则只会写到本地 sqlite 文件，线上数据库还是空的
+npx wrangler d1 execute misubfu-database --file=schema.sql --remote
 
-```bash
-npx wrangler d1 execute misub-clienta --remote \
+# 验证
+npx wrangler d1 execute misubfu-database --remote \
   --command="SELECT name FROM sqlite_master WHERE type='table';"
 ```
 
 应当看到 `subscriptions`、`profiles`、`settings` 三张表。
 
+**做法 B：控制台**
+
+`Workers & Pages` → 左侧 `D1 SQL 数据库` → `创建` → 名称填 `misubfu-database`。
+建好后进入该数据库 → `控制台` 标签页，把 [schema.sql](./schema.sql) 的内容整段粘贴进去执行：
+
+```sql
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS profiles (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_updated_at ON subscriptions(updated_at);
+CREATE INDEX IF NOT EXISTS idx_profiles_updated_at ON profiles(updated_at);
+CREATE INDEX IF NOT EXISTS idx_settings_updated_at ON settings(updated_at);
+```
+
+全部是 `CREATE TABLE IF NOT EXISTS`，重复执行是安全的。
+
+> ⚠️ 这一步一定要做。如果 D1 里没有这三张表，在设置里切到「D1 数据库」会因为
+> 建表缺失而中止（数据是安全的，但切不过去）。
+
 ### 步骤 3：创建第二个 Pages 项目
 
 Cloudflare 控制台 → `Workers & Pages` → `创建应用程序` → `Pages` → `连接到 Git`：
 
-- **仓库**：选同一个仓库（可以和现有项目共用，两个项目各自独立构建）
-- **项目名称**：`misub-clienta`
+- **仓库**：选同一个仓库 `jonathanfan-ee/MiSub`（两个 Pages 项目可以共用一个仓库，各自独立构建）
+- **项目名称**：`misubfu`
+- **生产分支**：`main`
 - **框架预设**：`Vue`
 - **构建命令**：`npm run build`
 - **构建输出目录**：`dist`
 
+> 共用仓库意味着以后推一次 `main`，两个站点都会自动更新 —— 这通常正是想要的。
+
 ### 步骤 4：绑定 KV 和 D1
 
-进入 `misub-clienta` 项目 → `设置` → `函数`：
+进入 `misubfu` 项目 → `设置` → `绑定` → `添加`：
 
 | 绑定类型 | 变量名（必须完全一致） | 选择的资源 |
 | --- | --- | --- |
-| KV 命名空间 | `MISUB_KV` | 步骤 1 创建的 `MISUB_KV_CLIENTA` |
-| D1 数据库 | `MISUB_DB` | 步骤 2 创建的 `misub-clienta` |
+| KV 命名空间 | `MISUB_KV` | 步骤 1 创建的 **`MISUBFU_KV`** |
+| D1 数据库 | `MISUB_DB` | 步骤 2 创建的 **`misubfu-database`** |
 
 > 变量名必须是 `MISUB_KV` 和 `MISUB_DB` —— 代码里读的就是这两个名字。
-> 后面那个「选择的资源」才是区分客户与你自己的关键。
+> 「选择的资源」那一列才是区分客户与你自己的关键。
+> 对照你自己的 `misub` 项目：变量名相同，但资源分别是 `MISUB_KV` / `misub-database`。
 
 ### 步骤 5：设置环境变量
 
-`设置` → `环境变量`，**生产环境和预览环境都要加**：
+`设置` → `变量和密钥` → `添加`，类型选 **密钥（Secret）**，**生产环境和预览环境都要加**：
 
 | 变量名 | 值 |
 | --- | --- |
 | `ADMIN_PASSWORD` | 给客户的管理员密码（**不要和你自己的相同**） |
 | `COOKIE_SECRET` | 新生成一个：`openssl rand -hex 32`（**不要和你自己的相同**） |
 
-> 预览环境如果不设，预览部署将无法登录。
+> 两点务必注意：
+> 1. 预览环境如果不设，预览部署将无法登录（新版会返回 503 并提示缺哪个变量）。
+> 2. `COOKIE_SECRET` 必须和你自己站点的**不同**。相同的话，一个站点签发的会话
+>    Cookie 在另一个站点也会被判为有效。
 
-### 步骤 6：重新部署并初始化
+### 步骤 6：绑定自定义域名 `misubfu.hjagi.cc`
+
+`misubfu` 项目 → `自定义域` → `设置自定义域` → 填 `misubfu.hjagi.cc` → `激活域`。
+
+因为 `hjagi.cc` 已经在你的 Cloudflare 账号里，CNAME 记录会自动创建，通常一两分钟生效。
+证书签发可能再等几分钟。
+
+验证：
+
+```bash
+curl -sI https://misubfu.hjagi.cc | head -1
+```
+
+### 步骤 7：重新部署并初始化
 
 回到 `部署` 选项卡点一次「重试部署」，让绑定和环境变量生效。
 
@@ -133,7 +205,7 @@ Cloudflare 控制台 → `Workers & Pages` → `创建应用程序` → `Pages` 
    > 务必改掉。
 3. **订阅组分享Token**：同样改成一个随机字符串，这是分发给客户的链接所用的凭证。
 
-### 步骤 7：交付给客户
+### 步骤 8：交付给客户
 
 在仪表盘右侧「生成订阅链接」面板：
 
@@ -149,12 +221,23 @@ Cloudflare 控制台 → `Workers & Pages` → `创建应用程序` → `Pages` 
 
 新部署完成后，逐项确认两个站点互不影响：
 
-- [ ] 两个 Pages 项目的 **KV 绑定**指向不同的命名空间
-- [ ] 两个 Pages 项目的 **D1 绑定**指向不同的数据库
-- [ ] 两个站点的 `ADMIN_PASSWORD` 不同
-- [ ] 两个站点的 `COOKIE_SECRET` 不同（相同的话，一个站点的会话 Cookie 在另一个站点也有效）
-- [ ] 两个站点的 `mytoken` / `profileToken` 不同
-- [ ] 在客户站点加一条订阅并保存，回到自己的站点刷新，确认**没有**出现这条订阅
+| 检查项 | `misub`（你自己） | `misubfu`（客户） | 必须 |
+| --- | --- | --- | --- |
+| KV 绑定指向的命名空间 | `MISUB_KV` | `MISUBFU_KV` | 不同 |
+| D1 绑定指向的数据库 | `misub-database` | `misubfu-database` | 不同 |
+| `ADMIN_PASSWORD` | — | — | 不同 |
+| `COOKIE_SECRET` | — | — | **不同** |
+| 设置里的 `mytoken` | — | — | 不同 |
+| 设置里的 `profileToken` | — | — | 不同 |
+
+最后做一次实测，这是最可靠的验证：
+
+- [ ] 在 `misubfu.hjagi.cc` 加一条订阅并保存
+- [ ] 刷新 `misub.hjagi.cc`，确认**没有**出现这条订阅
+- [ ] 反向再试一次
+
+如果两边数据串了，八成是 KV 或 D1 绑定选到了同一个资源 —— 回到步骤 4 检查
+「选择的资源」那一列（变量名相同是正确的，资源必须不同）。
 
 ---
 
