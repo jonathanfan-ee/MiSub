@@ -1,6 +1,48 @@
 //
 // src/lib/utils.js
 //
+
+/**
+ * 复制文本到剪贴板，带降级方案。
+ * navigator.clipboard 只在安全上下文（https / localhost）可用，
+ * 通过 IP 或 http 访问时它是 undefined —— 直接调用会抛异常。
+ * 之前的调用点既不 await 也不 catch，复制失败时仍然弹「已复制」，
+ * 用户以为拿到了链接，粘贴出来却是空的。
+ * @param {string} text 要复制的文本
+ * @returns {Promise<boolean>} 是否复制成功
+ */
+export async function copyText(text) {
+  const value = String(text ?? '');
+  if (!value) return false;
+
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      // 继续尝试降级方案（可能是权限被拒或非安全上下文）
+    }
+  }
+
+  // 降级：临时 textarea + execCommand
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-1000px';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function extractNodeName(url) {
     if (!url) return '';
     url = url.trim();

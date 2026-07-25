@@ -1,6 +1,6 @@
 // FILE: src/composables/useManualNodes.js
 import { ref, computed, watch } from 'vue';
-import { useToastStore } from '../stores/toast'; // 引入 Toast
+import { useToastStore } from '../stores/toast.js'; // 引入 Toast
 
 export function useManualNodes(initialNodesRef, markDirty) {
   const { showToast } = useToastStore(); // 获取 showToast 函数
@@ -82,53 +82,20 @@ export function useManualNodes(initialNodesRef, markDirty) {
       return manualNodes.value;
     }
     const searchQuery = searchTerm.value.toLowerCase().trim();
-    
-    // 调试信息
-    console.log('🔍 搜索过滤执行:', { 
-      searchTerm: searchTerm.value, 
-      searchQuery, 
-      totalNodes: manualNodes.value.length,
-      sampleNodes: manualNodes.value.slice(0, 3).map(n => n.name)
+    if (!searchQuery) return manualNodes.value;
+
+    // 支持用地区代码搜中文名（例如输入 hk 命中「香港」）
+    const alternativeTerms = (countryCodeMap[searchQuery] || []).map(t => t.toLowerCase());
+
+    return manualNodes.value.filter(node => {
+      const nodeName = (node.name || '').toLowerCase();
+      if (!nodeName) return false;
+      if (nodeName.includes(searchQuery)) return true;
+      return alternativeTerms.some(altTerm => nodeName.includes(altTerm));
     });
-    
-    const filtered = manualNodes.value.filter(node => {
-      if (!node.name) return false;
-      
-      const nodeName = node.name.toLowerCase();
-      
-      // 直接搜索匹配
-      if (nodeName.includes(searchQuery)) {
-        console.log('✅ 直接匹配:', node.name);
-        return true;
-      }
-      
-      // 获取可能的替代搜索词（国家代码映射）
-      const alternativeTerms = countryCodeMap[searchQuery] || [];
-      
-      // 检查节点名称是否包含任何替代词
-      for (const altTerm of alternativeTerms) {
-        if (nodeName.includes(altTerm.toLowerCase())) {
-          console.log('✅ 替代词匹配:', node.name, '匹配词:', altTerm);
-          return true;
-        }
-      }
-      
-      return false;
-    });
-    
-    console.log('🔍 搜索结果:', { 
-      filteredCount: filtered.length, 
-      searchQuery,
-      filteredNodes: filtered.map(n => n.name)
-    });
-    
-    return filtered;
   });
-  
-  // 保持原始节点数据不变，用于显示总数等
-  const originalManualNodes = computed(() => manualNodes.value);
-  
-  const manualNodesTotalPages = computed(() => Math.ceil(filteredManualNodes.value.length / manualNodesPerPage));
+
+  const manualNodesTotalPages = computed(() => Math.max(1, Math.ceil(filteredManualNodes.value.length / manualNodesPerPage)));
 
   // [修改] 分页使用过滤后的节点
   const paginatedManualNodes = computed(() => {
@@ -142,7 +109,14 @@ export function useManualNodes(initialNodesRef, markDirty) {
   function changeManualNodesPage(page) {
     if (page < 1 || page > manualNodesTotalPages.value) return;
     manualNodesCurrentPage.value = page;
-  }  
+  }
+
+  /** 整表替换（备份恢复、统一排序等场景使用）。 */
+  function setManualNodes(nodes) {
+    initializeManualNodes(nodes);
+    manualNodesCurrentPage.value = 1;
+    markDirty();
+  }
 
   function addNode(node) {
     manualNodes.value.unshift(node);
@@ -236,20 +210,24 @@ export function useManualNodes(initialNodesRef, markDirty) {
     }
   }
 
+  // 排序前先兜底 name：initializeManualNodes 不保证 name 存在，
+  // 而 localeCompare 在 undefined 上会抛异常，导致排序中途失败、列表半排序。
   function autoSortNodes() {
     const regionKeywords = { HK: [/香港/,/HK/,/Hong Kong/i], TW: [/台湾/,/TW/,/Taiwan/i], SG: [/新加坡/,/SG/,/狮城/,/Singapore/i], JP: [/日本/,/JP/,/Japan/i], US: [/美国/,/US/,/United States/i], KR: [/韩国/,/KR/,/Korea/i], GB: [/英国/,/GB/,/UK/,/United Kingdom/i], DE: [/德国/,/DE/,/Germany/i], FR: [/法国/,/FR/,/France/i], CA: [/加拿大/,/CA/,/Canada/i], AU: [/澳大利亚/,/AU/,/Australia/i], };
     const regionOrder = ['HK', 'TW', 'SG', 'JP', 'US', 'KR', 'GB', 'DE', 'FR', 'CA', 'AU'];
     const getRegionCode = (name) => { for (const code in regionKeywords) { for (const keyword of regionKeywords[code]) { if (keyword.test(name)) return code; } } return 'ZZ'; };
     
     manualNodes.value.sort((a, b) => {
-        const regionA = getRegionCode(a.name);
-        const regionB = getRegionCode(b.name);
+        const nameA = a.name || '';
+        const nameB = b.name || '';
+        const regionA = getRegionCode(nameA);
+        const regionB = getRegionCode(nameB);
         const indexA = regionOrder.indexOf(regionA);
         const indexB = regionOrder.indexOf(regionB);
         const effectiveIndexA = indexA === -1 ? Infinity : indexA;
         const effectiveIndexB = indexB === -1 ? Infinity : indexB;
         if (effectiveIndexA !== effectiveIndexB) return effectiveIndexA - effectiveIndexB;
-        return a.name.localeCompare(b.name, 'zh-CN');
+        return nameA.localeCompare(nameB, 'zh-CN');
     });
     // [修正] 只標記為 dirty，不呼叫 handleSave
     markDirty();
@@ -265,13 +243,19 @@ export function useManualNodes(initialNodesRef, markDirty) {
   }, { immediate: true, deep: true });
 
   return {
-    manualNodes: originalManualNodes, // 返回原始数据，不经过搜索过滤
+    // 直接返回可写的 ref。
+    // 之前这里返回的是 computed(() => manualNodes.value)，只读；
+    // Dashboard 的「从备份恢复」执行 manualNodes.value = data.manualNodes 时
+    // Vue 只会在控制台warn一句，手动节点被静默丢弃。
+    manualNodes,
     manualNodesCurrentPage,
     manualNodesTotalPages,
+    filteredManualNodes,  // 供面板显示「x/y 条结果」
     paginatedManualNodes, // 这个已经经过搜索过滤和分页
     enabledManualNodesCount: computed(() => enabledManualNodes.value.length),
     searchTerm, // [新增] 导出搜索词
     changeManualNodesPage,
+    setManualNodes,
     addNode,
     updateNode,
     deleteNode,

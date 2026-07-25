@@ -9,6 +9,145 @@ const KV_KEY_SETTINGS = 'worker_settings_v1';
 const COOKIE_NAME = 'auth_session';
 const SESSION_DURATION = 8 * 60 * 60 * 1000;
 
+// 支持的节点协议：所有需要识别节点链接的地方都必须使用这一份定义，
+// 避免各处正则不一致导致「统计到的节点数」和「实际下发的节点数」对不上。
+const NODE_PROTOCOLS = ['ss', 'ssr', 'vmess', 'vless', 'trojan', 'hysteria2', 'hysteria', 'hy2', 'hy', 'tuic', 'anytls', 'socks5'];
+const NODE_PROTOCOL_PATTERN = '(ss|ssr|vmess|vless|trojan|hysteria2?|hy2?|tuic|anytls|socks5)';
+// 单行匹配（用于判断某一行是否是节点）
+const NODE_LINE_REGEX = new RegExp(`^${NODE_PROTOCOL_PATTERN}:\\/\\/`, 'i');
+/** 每次调用都返回一个新的全局正则，避免共享 lastIndex 造成的漏匹配。 */
+const nodeCountRegex = () => new RegExp(`^${NODE_PROTOCOL_PATTERN}:\\/\\/`, 'gim');
+
+/**
+ * 从订阅响应头中提取机场自己声明的订阅名称。
+ * 机场普遍用这两种方式声明名称：
+ *   · `profile-title: xxx` 或 `profile-title: base64:5rWL6K+V`（Clash/Stash 约定）
+ *   · `Content-Disposition: attachment; filename="xxx"` / `filename*=UTF-8''xxx`
+ * 取不到则退回 URL 的主机名，保证「不填将自动获取」这句提示总能兑现。
+ * @param {Headers} headers 响应头
+ * @param {string} subUrl 订阅地址
+ * @returns {string} 订阅名称
+ */
+function extractSubscriptionName(headers, subUrl) {
+    const clean = (s) => String(s || '').replace(/[\r\n]/g, '').trim();
+
+    const profileTitle = headers.get('profile-title');
+    if (profileTitle) {
+        const raw = clean(profileTitle);
+        if (/^base64:/i.test(raw)) {
+            const decoded = b64ToUtf8(raw.replace(/^base64:/i, ''));
+            if (decoded) return clean(decoded);
+        } else if (raw) {
+            return raw;
+        }
+    }
+
+    const disposition = headers.get('content-disposition');
+    if (disposition) {
+        // 优先 filename*=UTF-8''xxx（支持中文），其次普通 filename="xxx"
+        const utf8Match = disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+        if (utf8Match) {
+            try {
+                const name = clean(decodeURIComponent(utf8Match[1])).replace(/\.(ya?ml|txt|conf|json)$/i, '');
+                if (name) return name;
+            } catch { /* 继续尝试普通 filename */ }
+        }
+        const plainMatch = disposition.match(/filename\s*=\s*"?([^";]+)"?/i);
+        if (plainMatch) {
+            const name = clean(plainMatch[1]).replace(/\.(ya?ml|txt|conf|json)$/i, '');
+            if (name) return name;
+        }
+    }
+
+    // 兜底：用主机名，至少比「未命名订阅」有意义
+    try {
+        return new URL(subUrl).hostname;
+    } catch {
+        return '';
+    }
+}
+
+/** base64 / base64url 解码为 UTF-8 字符串，自动补齐 padding。失败返回 null。 */
+function b64ToUtf8(input) {
+    try {
+        const normalized = String(input).trim().replace(/-/g, '+').replace(/_/g, '/').replace(/\s/g, '');
+        const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+        const binaryString = atob(padded);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+        return new TextDecoder('utf-8').decode(bytes);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 取出节点链接中用于显示/过滤的名称。
+ * vmess 的名称藏在 base64 JSON 的 `ps` 字段里、ssr 的藏在 base64 查询串的 `remarks` 里，
+ * 都不在 `#` 片段中。只看 `#` 后面的内容会让针对名称的过滤规则对这两种协议完全失效
+ * （keep 规则把它们全部丢掉，exclude 规则又永远删不掉它们）。
+ * @param {string} link 节点链接
+ * @returns {string} 节点名称，取不到时返回空字符串
+ */
+function getNodeDisplayName(link) {
+    if (!link) return '';
+    const lower = link.toLowerCase();
+
+    if (lower.startsWith('vmess://')) {
+        const json = b64ToUtf8(link.substring('vmess://'.length));
+        if (json) {
+            try {
+                const nodeConfig = JSON.parse(json);
+                return String(nodeConfig.ps || nodeConfig.remark || '');
+            } catch { /* 落到下面的 # 片段逻辑 */ }
+        }
+    }
+
+    if (lower.startsWith('ssr://')) {
+        const decoded = b64ToUtf8(link.substring('ssr://'.length));
+        if (decoded) {
+            const queryPart = decoded.split('/?')[1];
+            if (queryPart) {
+                const remarks = new URLSearchParams(queryPart).get('remarks');
+                if (remarks) return b64ToUtf8(remarks) ?? remarks;
+            }
+        }
+    }
+
+    const hashIndex = link.lastIndexOf('#');
+    if (hashIndex === -1) return '';
+    const raw = link.substring(hashIndex + 1);
+    try {
+        return decodeURIComponent(raw);
+    } catch {
+        return raw; // 名称里有裸 % 时 decodeURIComponent 会抛，退回原文而不是丢掉节点
+    }
+}
+
+/**
+ * 安全地编译用户填写的过滤正则。
+ * 用户在「包含/排除节点」里写了一个非法正则时，绝不能让异常冒泡 ——
+ * 上层的 catch 会把整条订阅当成失败并返回空字符串，等于该机场的节点全部消失。
+ * @param {string[]} parts 正则片段
+ * @param {(msg: string) => void} [onError] 编译失败时的回调
+ * @returns {RegExp|null}
+ */
+function compileNameRegex(parts, onError) {
+    if (!parts || parts.length === 0) return null;
+    try {
+        return new RegExp(parts.join('|'), 'i');
+    } catch (e) {
+        // 逐条编译，尽量保留用户写对的那些规则
+        const valid = [];
+        for (const part of parts) {
+            try { new RegExp(part, 'i'); valid.push(part); } catch { /* 丢掉这一条 */ }
+        }
+        if (onError) onError(`过滤规则中存在非法正则，已忽略：${e.message}`);
+        if (valid.length === 0) return null;
+        try { return new RegExp(valid.join('|'), 'i'); } catch { return null; }
+    }
+}
+
 /**
  * 计算数据的简单哈希值，用于检测变更
  * @param {any} data - 要计算哈希的数据
@@ -179,6 +318,10 @@ const defaultSettings = {
     useDirectClashMeta: false, // 是否直接生成 Clash Meta YAML（跳过 subconverter）
     clashMetaTemplateUrl: '', // Clash Meta 模板 URL（留空则使用内置默认模板）
     autoInsertToSelect: true, // 是否自动将节点插入到 select 类型的代理组
+    // 订阅被客户端访问时是否推送 TG 通知。默认关闭：客户端会定期自动更新订阅，
+    // 开启后会产生大量重复消息（每次更新一条）。
+    notifyOnSubAccess: false,
+    notifyOnSettingsChange: false, // 保存设置时是否推送 TG 通知
     // manualNodesPosition: 已废弃，由统一排序控制
 };
 
@@ -186,10 +329,10 @@ const formatBytes = (bytes, decimals = 2) => {
     if (!+bytes || bytes < 0) return '0 B';
     const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-    // toFixed(dm) after dividing by pow(k, i) was producing large decimal numbers
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    if (i < 0) return '0 B'; // Handle log(0) case
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
+    // 需要 clamp：机场偶尔会返回超大的 total（例如「无限流量」用 2^63 表示），
+    // 不做上限保护时 sizes[i] 会越界，模板里就会出现 "undefined"。
+    const i = Math.min(Math.max(Math.floor(Math.log(bytes) / Math.log(k)), 0), sizes.length - 1);
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 };
 
@@ -252,7 +395,10 @@ async function handleCronTrigger(env) {
     const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝以便比较
     const settings = await storageAdapter.get(KV_KEY_SETTINGS) || defaultSettings;
 
-    const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//gm;
+    // 必须显式声明：之前缺少这个声明，ES 模块的严格模式下赋值会抛 ReferenceError，
+    // 导致定时任务每次都失败，流量/到期信息永远不会落盘（通知时间戳也不会保存，
+    // 于是同一条到期提醒会每 6 小时重复推送一次）。
+    let changesMade = false;
 
     for (const sub of allSubs) {
         if (sub.url.startsWith('http') && sub.enabled) {
@@ -298,7 +444,7 @@ async function handleCronTrigger(env) {
                     } catch {
                         decoded = text;
                     }
-                    const matches = decoded.match(nodeRegex);
+                    const matches = decoded.match(nodeCountRegex());
                     if (matches) {
                         sub.nodeCount = matches.length; // 更新節點數量
                         changesMade = true;
@@ -340,14 +486,120 @@ async function verifySignedToken(key, token) {
     const expectedToken = await createSignedToken(key, data);
     return token === expectedToken ? data : null;
 }
+/**
+ * 校验会话，返回签发时间戳（毫秒）；无效时返回 null。
+ * 返回值可直接当布尔用（null 为假），所以原有的 `if (!await authMiddleware(...))` 调用点无需改动。
+ */
 async function authMiddleware(request, env) {
-    if (!env.COOKIE_SECRET) return false;
+    if (!env.COOKIE_SECRET) return null;
     const cookie = request.headers.get('Cookie');
     const sessionCookie = cookie?.split(';').find(c => c.trim().startsWith(`${COOKIE_NAME}=`));
-    if (!sessionCookie) return false;
-    const token = sessionCookie.split('=')[1];
+    if (!sessionCookie) return null;
+    // Cookie 值本身可能含 '='（base64/hex 拼接），只在第一个 '=' 处切分
+    const eqIndex = sessionCookie.indexOf('=');
+    const token = sessionCookie.substring(eqIndex + 1).trim();
     const verifiedData = await verifySignedToken(env.COOKIE_SECRET, token);
-    return verifiedData && (Date.now() - parseInt(verifiedData, 10) < SESSION_DURATION);
+    if (!verifiedData) return null;
+    const issuedAt = parseInt(verifiedData, 10);
+    if (!Number.isFinite(issuedAt)) return null;
+    const age = Date.now() - issuedAt;
+    // 同时校验下界：签发时间在未来的 token 一律拒绝，否则一个未来时间戳的
+    // 会话将永不过期。
+    if (age < 0 || age >= SESSION_DURATION) return null;
+    return issuedAt;
+}
+
+// 会话过半时就顺带续期，避免用户开着页面过夜、第二天一操作就 Unauthorized
+const SESSION_RENEW_AFTER = SESSION_DURATION / 2;
+
+/**
+ * 滑动续期：只要这次请求带的会话仍然有效且已经用掉一半有效期，
+ * 就在响应里下发一个新的 Cookie。这样持续在用的用户不会被动登出。
+ * @param {Request} request
+ * @param {Object} env
+ * @param {Response} response
+ * @returns {Promise<Response>}
+ */
+async function withRenewedSession(request, env, response) {
+    try {
+        // 登录/登出接口自己管理 Cookie，不要覆盖
+        const path = new URL(request.url).pathname;
+        if (path.endsWith('/login') || path.endsWith('/logout')) return response;
+
+        const issuedAt = await authMiddleware(request, env);
+        if (!issuedAt) return response;
+        if (Date.now() - issuedAt < SESSION_RENEW_AFTER) return response;
+
+        const token = await createSignedToken(env.COOKIE_SECRET, String(Date.now()));
+        // Response 的 headers 可能不可变，复制一份
+        const headers = new Headers(response.headers);
+        headers.append('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_DURATION / 1000}`);
+        return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+    } catch (e) {
+        console.warn('[Session] 续期失败（不影响本次请求）:', e.message);
+        return response;
+    }
+}
+
+/**
+ * 恒定时间字符串比较，避免用 === 比较密码时通过响应耗时逐字符推断密码。
+ * @param {string} a
+ * @param {string} b
+ */
+function timingSafeEqual(a, b) {
+    const strA = String(a ?? '');
+    const strB = String(b ?? '');
+    // 长度不同也要跑完整个循环，只把结果标记为不相等
+    let mismatch = strA.length === strB.length ? 0 : 1;
+    const len = Math.max(strA.length, strB.length);
+    for (let i = 0; i < len; i++) {
+        mismatch |= (strA.charCodeAt(i) || 0) ^ (strB.charCodeAt(i) || 0);
+    }
+    return mismatch === 0;
+}
+
+const LOGIN_ATTEMPT_PREFIX = 'misub_login_attempts_';
+const LOGIN_MAX_ATTEMPTS = 8;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+
+/**
+ * 基于来源 IP 的简易登录限流。存储不可用时「放行」而不是「锁死」，
+ * 以免 KV 故障把管理员彻底关在门外。
+ */
+async function checkLoginRateLimit(request, env) {
+    if (!env.MISUB_KV) return { allowed: true, key: null, attempts: 0 };
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const key = `${LOGIN_ATTEMPT_PREFIX}${ip}`;
+    try {
+        const record = await env.MISUB_KV.get(key, 'json');
+        if (record && record.count >= LOGIN_MAX_ATTEMPTS && (Date.now() - record.first) < LOGIN_LOCKOUT_MS) {
+            const retryAfterMs = LOGIN_LOCKOUT_MS - (Date.now() - record.first);
+            return { allowed: false, key, attempts: record.count, retryAfterMs };
+        }
+        return { allowed: true, key, attempts: record && (Date.now() - record.first) < LOGIN_LOCKOUT_MS ? record.count : 0, first: record?.first };
+    } catch (e) {
+        console.warn('[Login] 读取限流记录失败，本次放行:', e.message);
+        return { allowed: true, key: null, attempts: 0 };
+    }
+}
+
+async function recordLoginFailure(env, state) {
+    if (!env.MISUB_KV || !state.key) return;
+    try {
+        const first = state.attempts > 0 && state.first ? state.first : Date.now();
+        await env.MISUB_KV.put(
+            state.key,
+            JSON.stringify({ count: state.attempts + 1, first }),
+            { expirationTtl: Math.ceil(LOGIN_LOCKOUT_MS / 1000) }
+        );
+    } catch (e) {
+        console.warn('[Login] 写入限流记录失败:', e.message);
+    }
+}
+
+async function clearLoginFailures(env, state) {
+    if (!env.MISUB_KV || !state.key || state.attempts === 0) return;
+    try { await env.MISUB_KV.delete(state.key); } catch { /* 忽略 */ }
 }
 
 // sub: 要检查的订阅对象
@@ -452,6 +704,12 @@ async function handleApiRequest(request, env) {
     // [新增] 安全的、可重复执行的迁移接口
     if (path === '/migrate') {
         if (!await authMiddleware(request, env)) { return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }); }
+        if (request.method !== 'GET' && request.method !== 'POST') {
+            return new Response('Method Not Allowed', { status: 405 });
+        }
+        if (!env.MISUB_KV) {
+            return new Response(JSON.stringify({ success: false, message: '未绑定 KV 命名空间（MISUB_KV），无法执行旧版数据迁移。' }), { status: 400 });
+        }
         try {
             const oldData = await env.MISUB_KV.get(OLD_KV_KEY, 'json');
             const newDataExists = await env.MISUB_KV.get(KV_KEY_SUBS) !== null;
@@ -477,18 +735,63 @@ async function handleApiRequest(request, env) {
 
     if (path === '/login') {
         if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+
+        // 先检查服务端配置：缺少任一项时必须拒绝登录并给出可操作的提示。
+        // 之前没有这个检查，未设置 ADMIN_PASSWORD 时 `password === env.ADMIN_PASSWORD`
+        // 会在两边都是 undefined 时成立，等于任何人不填密码就能拿到管理员会话。
+        if (!env.ADMIN_PASSWORD) {
+            console.error('[API Error /login] 环境变量 ADMIN_PASSWORD 未设置，已拒绝全部登录请求');
+            return new Response(JSON.stringify({
+                error: '服务端未配置管理员密码（ADMIN_PASSWORD），请在 Cloudflare 项目的环境变量中设置后重新部署。'
+            }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (!env.COOKIE_SECRET) {
+            console.error('[API Error /login] 环境变量 COOKIE_SECRET 未设置，无法签发会话');
+            return new Response(JSON.stringify({
+                error: '服务端未配置 COOKIE_SECRET，请在 Cloudflare 项目的环境变量中设置一个足够长的随机字符串后重新部署。'
+            }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+        }
+
+        const rateLimit = await checkLoginRateLimit(request, env);
+        if (!rateLimit.allowed) {
+            const minutes = Math.max(1, Math.ceil(rateLimit.retryAfterMs / 60000));
+            return new Response(JSON.stringify({ error: `尝试次数过多，请在 ${minutes} 分钟后重试。` }), {
+                status: 429,
+                headers: { 'Content-Type': 'application/json', 'Retry-After': String(Math.ceil(rateLimit.retryAfterMs / 1000)) }
+            });
+        }
+
+        let password;
         try {
-            const { password } = await request.json();
-            if (password === env.ADMIN_PASSWORD) {
-                const token = await createSignedToken(env.COOKIE_SECRET, String(Date.now()));
-                const headers = new Headers({ 'Content-Type': 'application/json' });
-                headers.append('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_DURATION / 1000}`);
-                return new Response(JSON.stringify({ success: true }), { headers });
-            }
-            return new Response(JSON.stringify({ error: '密码错误' }), { status: 401 });
+            const body = await request.json();
+            password = body?.password;
         } catch (e) {
-            console.error('[API Error /login]', e);
-            return new Response(JSON.stringify({ error: '请求体解析失败' }), { status: 400 });
+            console.error('[API Error /login] 请求体解析失败:', e);
+            return new Response(JSON.stringify({ error: '请求格式错误，请刷新页面后重试。' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+        }
+
+        if (typeof password !== 'string' || password === '') {
+            await recordLoginFailure(env, rateLimit);
+            return new Response(JSON.stringify({ error: '请输入密码' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+        }
+
+        if (!timingSafeEqual(password, env.ADMIN_PASSWORD)) {
+            await recordLoginFailure(env, rateLimit);
+            const remaining = Math.max(0, LOGIN_MAX_ATTEMPTS - (rateLimit.attempts + 1));
+            return new Response(JSON.stringify({
+                error: remaining > 0 ? `密码错误（还可尝试 ${remaining} 次）` : '密码错误，已触发临时锁定，请稍后再试。'
+            }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+        }
+
+        await clearLoginFailures(env, rateLimit);
+        try {
+            const token = await createSignedToken(env.COOKIE_SECRET, String(Date.now()));
+            const headers = new Headers({ 'Content-Type': 'application/json' });
+            headers.append('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_DURATION / 1000}`);
+            return new Response(JSON.stringify({ success: true }), { headers });
+        } catch (e) {
+            console.error('[API Error /login] 签发会话失败:', e);
+            return new Response(JSON.stringify({ error: '登录失败：无法签发会话，请检查 COOKIE_SECRET 配置。' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
         }
     }
     if (!await authMiddleware(request, env)) {
@@ -564,19 +867,21 @@ async function handleApiRequest(request, env) {
                     settings = defaultSettings; // 使用默认设置继续
                 }
 
-                // 步骤5: 处理通知（非阻塞，错误不影响保存）
+                // 步骤5: 处理通知。
+                // 必须在保存之前 await：checkAndNotify 会在 sub 上写入 lastNotifiedExpire /
+                // lastNotifiedTraffic 去重时间戳。之前是「不等待」，于是时间戳几乎总是
+                // 在写库之后才落到对象上、永远存不下来，同一条到期提醒每次保存都会重发。
                 try {
-                    const notificationPromises = misubs
-                        .filter(sub => sub && sub.url && sub.url.startsWith('http'))
-                        .map(sub => checkAndNotify(sub, settings, env).catch(notifyError => {
-                            console.error(`[API Warning /misubs] 通知处理失败 for ${sub.url}:`, notifyError);
-                            // 通知失败不影响保存流程
-                        }));
-
-                    // 并行处理通知，但不等待完成
-                    Promise.all(notificationPromises).catch(e => {
-                        console.error('[API Warning /misubs] 部分通知处理失败:', e);
-                    });
+                    const notificationTargets = misubs.filter(sub => sub && typeof sub.url === 'string' && sub.url.startsWith('http'));
+                    await Promise.race([
+                        Promise.allSettled(notificationTargets.map(sub =>
+                            checkAndNotify(sub, settings, env).catch(notifyError => {
+                                console.error(`[API Warning /misubs] 通知处理失败 for ${sub.url}:`, notifyError);
+                            })
+                        )),
+                        // 兜底：TG 不可达时不要把保存请求一起拖死
+                        new Promise(resolve => setTimeout(resolve, 5000))
+                    ]);
                 } catch (notificationError) {
                     console.error('[API Warning /misubs] 通知系统错误:', notificationError);
                     // 继续保存流程
@@ -614,12 +919,19 @@ async function handleApiRequest(request, env) {
 
         case '/node_count': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-            const { url: subUrl, id: subId } = await request.json();
+            let subUrl, subId;
+            try {
+                const body = await request.json();
+                subUrl = body?.url;
+                subId = body?.id;
+            } catch (e) {
+                return new Response(JSON.stringify({ error: '请求格式错误' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+            }
             if (!subUrl || typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
                 return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
             }
 
-            const result = { count: 0, userInfo: null };
+            const result = { count: 0, userInfo: null, name: '' };
             let decodedText = null;
 
             try {
@@ -643,6 +955,8 @@ async function handleApiRequest(request, env) {
                 // 1. 处理流量请求的结果
                 if (responses[0].status === 'fulfilled' && responses[0].value.ok) {
                     const trafficResponse = responses[0].value;
+                    // 顺手取出机场声明的订阅名，供前端在「订阅名称」留空时自动填入
+                    result.name = extractSubscriptionName(trafficResponse.headers, subUrl);
                     const userInfoHeader = trafficResponse.headers.get('subscription-userinfo');
                     if (userInfoHeader) {
                         const info = {};
@@ -663,7 +977,8 @@ async function handleApiRequest(request, env) {
                     const decoded = decodeMaybeBase64ToUtf8(text);
                     decodedText = decoded;
                     result.cachedRaw = decodedText;
-                    const lineMatches = decoded.match(/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls):\/\//gm);
+                    // 使用统一的协议列表：之前这里漏了 socks5，导致 socks5 订阅显示 0 个节点
+                    const lineMatches = decoded.match(nodeCountRegex());
                     if (lineMatches) {
                         result.count = lineMatches.length;
                     }
@@ -691,8 +1006,20 @@ async function handleApiRequest(request, env) {
                 }
 
                 if (subToUpdate) {
+                    // 订阅还没有名字时，用机场声明的名称补上并落盘
+                    if ((!subToUpdate.name || !String(subToUpdate.name).trim()) && result.name) {
+                        subToUpdate.name = result.name;
+                    }
+                    result.name = subToUpdate.name || result.name || '';
                     subToUpdate.nodeCount = result.count;
-                    subToUpdate.userInfo = result.userInfo;
+                    // 只在这次真的取到了流量信息时才覆盖。
+                    // 之前无条件赋值：机场偶尔超时/返回 5xx 时会把已有的流量和到期
+                    // 信息清成 null，卡片上的流量条和到期提醒随之消失。
+                    if (result.userInfo) {
+                        subToUpdate.userInfo = result.userInfo;
+                    } else {
+                        result.userInfo = subToUpdate.userInfo || null; // 回传旧值，前端不必清空
+                    }
                     subToUpdate.cachedRaw = typeof decodedText === 'string' ? decodedText : (subToUpdate.cachedRaw || '');
                     subToUpdate.cachedAt = Date.now();
                     subToUpdate.cachedFromUrl = subUrl;
@@ -713,20 +1040,29 @@ async function handleApiRequest(request, env) {
 
         case '/fetch_external_url': { // New case
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-            const { url: externalUrl } = await request.json();
+            let externalUrl;
+            try {
+                const body = await request.json();
+                externalUrl = body?.url;
+            } catch {
+                return new Response(JSON.stringify({ error: '请求格式错误' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+            }
             if (!externalUrl || typeof externalUrl !== 'string' || !/^https?:\/\//.test(externalUrl)) {
-                return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
+                return new Response(JSON.stringify({ error: '请输入有效的 http:// 或 https:// 链接' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
             }
 
             try {
-                const response = await fetch(new Request(externalUrl, {
-                    headers: { 'User-Agent': 'MiSub-Proxy/1.0' }, // Identify as proxy
-                    redirect: "follow",
-                    cf: { insecureSkipVerify: true } // Allow insecure SSL for flexibility
-                }));
+                const response = await Promise.race([
+                    fetch(new Request(externalUrl, {
+                        headers: { 'User-Agent': 'MiSub-Proxy/1.0' }, // Identify as proxy
+                        redirect: "follow",
+                        cf: { insecureSkipVerify: true } // 机场证书经常不规范，这里保持宽松
+                    })),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('请求超时')), 15000))
+                ]);
 
                 if (!response.ok) {
-                    return new Response(JSON.stringify({ error: `Failed to fetch external URL: ${response.status} ${response.statusText}` }), { status: response.status });
+                    return new Response(JSON.stringify({ error: `目标服务器返回 ${response.status}` }), { status: 502, headers: { 'Content-Type': 'application/json' } });
                 }
 
                 const content = await response.text();
@@ -734,7 +1070,7 @@ async function handleApiRequest(request, env) {
 
             } catch (e) {
                 console.error(`[API Error /fetch_external_url] Failed to fetch ${externalUrl}:`, e);
-                return new Response(JSON.stringify({ error: `Failed to fetch external URL: ${e.message}` }), { status: 500 });
+                return new Response(JSON.stringify({ error: `拉取失败：${e.message}` }), { status: 502, headers: { 'Content-Type': 'application/json' } });
             }
         }
 
@@ -752,8 +1088,28 @@ async function handleApiRequest(request, env) {
                 }
 
                 const storageAdapter = await getStorageAdapter(env);
-                const allSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                const subsToUpdate = allSubs.filter(sub => subscriptionIds.includes(sub.id) && sub.url.startsWith('http'));
+                const storedSubs = await storageAdapter.get(KV_KEY_SUBS);
+                // 存储读取失败时适配器返回 null。之前用 `|| []` 兜底并在最后无条件
+                // 写回，等于一次读失败就把用户的全部订阅清空。这里必须直接报错退出。
+                if (!Array.isArray(storedSubs)) {
+                    console.error('[Batch Update] 读取订阅数据失败，已中止以避免覆盖现有数据');
+                    return new Response(JSON.stringify({
+                        success: false,
+                        message: '读取订阅数据失败，已中止批量更新（未改动任何数据），请稍后重试。'
+                    }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+                }
+                const allSubs = storedSubs;
+                const subsToUpdate = allSubs.filter(sub => subscriptionIds.includes(sub.id) && typeof sub.url === 'string' && sub.url.startsWith('http'));
+
+                if (subsToUpdate.length === 0) {
+                    // 明确告诉前端「一个都没匹配上」，而不是回一个空的 success
+                    return new Response(JSON.stringify({
+                        success: true,
+                        message: '没有可更新的订阅（请先保存后再刷新）',
+                        matched: 0,
+                        results: []
+                    }), { headers: { 'Content-Type': 'application/json' } });
+                }
 
                 console.log(`[Batch Update] Starting batch update for ${subsToUpdate.length} subscriptions`);
 
@@ -786,8 +1142,7 @@ async function handleApiRequest(request, env) {
                             // 更新节点数量
                             const text = await response.text();
                             const decoded = decodeMaybeBase64ToUtf8(text);
-                            const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//gm;
-                            const matches = decoded.match(nodeRegex);
+                            const matches = decoded.match(nodeCountRegex());
                             sub.nodeCount = matches ? matches.length : 0;
                             // 保存原始解码后的订阅文本以供后续聚合使用
                             if (decoded && decoded.length > 0) {
@@ -796,7 +1151,18 @@ async function handleApiRequest(request, env) {
                                 sub.cachedFromUrl = sub.url;
                             }
 
-                            return { id: sub.id, success: true, nodeCount: sub.nodeCount };
+                            // 把缓存元信息一并回传：前端保存时会整表覆盖，
+                            // 如果它不知道后端刚写入的缓存，下一次保存就会把 cachedRaw 抹掉。
+                            return {
+                                id: sub.id,
+                                success: true,
+                                nodeCount: sub.nodeCount,
+                                userInfo: sub.userInfo || null,
+                                cachedRaw: sub.cachedRaw || '',
+                                cachedAt: sub.cachedAt || null,
+                                cachedFromUrl: sub.cachedFromUrl || null,
+                                cachedRawPresent: !!(sub.cachedRaw && sub.cachedRaw.length > 0)
+                            };
                         } else {
                             return { id: sub.id, success: false, error: `HTTP ${response.status}` };
                         }
@@ -813,11 +1179,16 @@ async function handleApiRequest(request, env) {
                 // 使用存储适配器保存更新后的数据
                 await storageAdapter.put(KV_KEY_SUBS, allSubs);
 
-                console.log(`[Batch Update] Completed batch update, ${updateResults.filter(r => r.success).length} successful`);
+                const successCount = updateResults.filter(r => r.success).length;
+                console.log(`[Batch Update] Completed batch update, ${successCount} successful`);
 
+                const failed = updateResults.filter(r => !r.success);
                 return new Response(JSON.stringify({
                     success: true,
-                    message: '批量更新完成',
+                    message: failed.length === 0
+                        ? `批量更新完成，成功 ${successCount} 个`
+                        : `批量更新完成：成功 ${successCount} 个，失败 ${failed.length} 个`,
+                    matched: subsToUpdate.length,
                     results: updateResults
                 }), { headers: { 'Content-Type': 'application/json' } });
 
@@ -844,20 +1215,88 @@ async function handleApiRequest(request, env) {
             if (request.method === 'POST') {
                 try {
                     const newSettings = await request.json();
-                    const storageAdapter = await getStorageAdapter(env);
+                    if (!newSettings || typeof newSettings !== 'object' || Array.isArray(newSettings)) {
+                        return new Response(JSON.stringify({ success: false, message: '设置数据格式错误' }), { status: 400 });
+                    }
+
+                    const currentStorageType = await StorageFactory.getStorageType(env);
+                    const storageAdapter = StorageFactory.createAdapter(env, currentStorageType);
                     const oldSettings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
                     const finalSettings = { ...oldSettings, ...newSettings };
 
-                    // 使用存储适配器保存设置
-                    await storageAdapter.put(KV_KEY_SETTINGS, finalSettings);
+                    // 归一化存储类型，避免把非法值写进去导致后续一直回退到 KV
+                    const requestedType = finalSettings.storageType === STORAGE_TYPES.D1 ? STORAGE_TYPES.D1 : STORAGE_TYPES.KV;
+                    finalSettings.storageType = requestedType;
 
-                    const message = `⚙️ *MiSub 设置更新* ⚙️\n\n您的 MiSub 应用设置已成功更新。`;
-                    await sendTgNotification(finalSettings, message);
+                    // --- 切换存储类型 ---
+                    // 关键点：之前的实现把新设置写回「旧」存储。切到 D1 时，
+                    // 设置项留在 KV 里而 D1 里什么都没有，于是 getStorageType 仍读到旧值、
+                    // 或读到空的 D1 —— 表现就是「一保存设置，所有订阅和订阅组全没了，
+                    // 已分发的订阅链接立刻 403」。
+                    // 现在改为：先把现有数据搬到目标存储，再把设置写进目标存储。
+                    let migrationNote = '';
+                    if (requestedType !== currentStorageType) {
+                        if (requestedType === STORAGE_TYPES.D1 && !env.MISUB_DB) {
+                            return new Response(JSON.stringify({
+                                success: false,
+                                message: '未绑定 D1 数据库（MISUB_DB），无法切换到 D1 存储。请先在 Cloudflare 项目设置中添加绑定。'
+                            }), { status: 400 });
+                        }
+                        const targetAdapter = StorageFactory.createAdapter(env, requestedType);
+                        try {
+                            const [subs, profiles] = await Promise.all([
+                                storageAdapter.get(KV_KEY_SUBS),
+                                storageAdapter.get(KV_KEY_PROFILES)
+                            ]);
+                            // 只在目标存储为空时搬运，避免覆盖目标里已有的更新数据
+                            const [targetSubs, targetProfiles] = await Promise.all([
+                                targetAdapter.get(KV_KEY_SUBS),
+                                targetAdapter.get(KV_KEY_PROFILES)
+                            ]);
+                            const writes = [];
+                            if (Array.isArray(subs) && subs.length > 0 && !(Array.isArray(targetSubs) && targetSubs.length > 0)) {
+                                writes.push(targetAdapter.put(KV_KEY_SUBS, subs));
+                            }
+                            if (Array.isArray(profiles) && profiles.length > 0 && !(Array.isArray(targetProfiles) && targetProfiles.length > 0)) {
+                                writes.push(targetAdapter.put(KV_KEY_PROFILES, profiles));
+                            }
+                            if (writes.length > 0) {
+                                await Promise.all(writes);
+                                migrationNote = `，并已将现有数据同步到 ${requestedType === STORAGE_TYPES.D1 ? 'D1 数据库' : 'KV 存储'}`;
+                            }
+                        } catch (copyError) {
+                            console.error('[API Error /settings POST] 切换存储类型时同步数据失败:', copyError);
+                            return new Response(JSON.stringify({
+                                success: false,
+                                message: `切换存储类型失败：无法把现有数据同步到目标存储（${copyError.message}）。设置未改动，你的数据是安全的。`
+                            }), { status: 500 });
+                        }
+                        // 设置写入目标存储，让后续请求从目标存储读取
+                        await targetAdapter.put(KV_KEY_SETTINGS, finalSettings);
+                        // 同时更新旧存储里的 storageType，避免 getStorageType 的回退分支读到过期值
+                        try {
+                            await storageAdapter.put(KV_KEY_SETTINGS, finalSettings);
+                        } catch (e) {
+                            console.warn('[Settings] 旧存储的设置同步失败（可忽略）:', e.message);
+                        }
+                    } else {
+                        await storageAdapter.put(KV_KEY_SETTINGS, finalSettings);
+                    }
 
-                    return new Response(JSON.stringify({ success: true, message: '设置已保存' }));
+                    // TG 通知默认关闭：每次保存设置都推一条消息噪音太大
+                    if (finalSettings.notifyOnSettingsChange) {
+                        const message = `⚙️ *MiSub 设置更新* ⚙️\n\n您的 MiSub 应用设置已成功更新。`;
+                        await sendTgNotification(finalSettings, message);
+                    }
+
+                    return new Response(JSON.stringify({
+                        success: true,
+                        message: `设置已保存${migrationNote}`,
+                        storageType: requestedType
+                    }), { headers: { 'Content-Type': 'application/json' } });
                 } catch (e) {
                     console.error('[API Error /settings POST]', 'Failed to parse request or write settings:', e);
-                    return new Response(JSON.stringify({ error: '保存设置失败' }), { status: 500 });
+                    return new Response(JSON.stringify({ success: false, message: `保存设置失败: ${e.message || '存储服务暂时不可用'}` }), { status: 500 });
                 }
             }
             return new Response('Method Not Allowed', { status: 405 });
@@ -906,7 +1345,7 @@ function prependNodeName(link, prefix) {
 
 // --- 节点列表生成函数（保留前端保存的顺序） ---
 async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '', debugCollector = null) {
-    const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//;
+    const nodeRegex = NODE_LINE_REGEX;
 
     // 逐项按保存顺序生成，HTTP 订阅并行请求但保持顺序
     const itemTasks = misubs.map((item) => {
@@ -967,19 +1406,16 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                                 nameRegexParts.push(content);
                             }
                         });
-                        const nameRegex = nameRegexParts.length > 0 ? new RegExp(nameRegexParts.join('|'), 'i') : null;
+                        const nameRegex = compileNameRegex(nameRegexParts, msg => console.warn(`[Filter] 订阅「${sub.name || sub.id}」${msg}`));
                         validNodes = validNodes.filter(nodeLink => {
                             const protocolMatch = nodeLink.match(/^(.*?):\/\//);
                             const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
                             if (protocolsToKeep.has(protocol)) return true;
                             if (nameRegex) {
-                                const hashIndex = nodeLink.lastIndexOf('#');
-                                if (hashIndex !== -1) {
-                                    try {
-                                        const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
-                                        if (nameRegex.test(nodeName)) return true;
-                                    } catch (e) { }
-                                }
+                                // 用 getNodeDisplayName 而不是只看 # 片段，否则 vmess 节点
+                                // （名称在 base64 JSON 的 ps 字段里）永远匹配不到，keep 规则会把它们全部丢掉。
+                                const nodeName = getNodeDisplayName(nodeLink);
+                                if (nodeName && nameRegex.test(nodeName)) return true;
                             }
                             return false;
                         });
@@ -992,19 +1428,14 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                                 protocols.forEach(p => protocolsToExclude.add(p));
                             } else { nameRegexParts.push(rule); }
                         });
-                        const nameRegex = nameRegexParts.length > 0 ? new RegExp(nameRegexParts.join('|'), 'i') : null;
+                        const nameRegex = compileNameRegex(nameRegexParts, msg => console.warn(`[Filter] 订阅「${sub.name || sub.id}」${msg}`));
                         validNodes = validNodes.filter(nodeLink => {
                             const protocolMatch = nodeLink.match(/^(.*?):\/\//);
                             const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
                             if (protocolsToExclude.has(protocol)) return false;
                             if (nameRegex) {
-                                const hashIndex = nodeLink.lastIndexOf('#');
-                                if (hashIndex !== -1) {
-                                    try {
-                                        const nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
-                                        if (nameRegex.test(nodeName)) return false;
-                                    } catch (e) { }
-                                }
+                                const nodeName = getNodeDisplayName(nodeLink);
+                                if (nodeName && nameRegex.test(nodeName)) return false;
                             }
                             return true;
                         });
@@ -1090,7 +1521,7 @@ async function handleMisubRequest(context) {
 
         // [修正] 使用 config 變量
         if (!token || token !== config.profileToken) {
-            return new Response('Invalid Profile Token', { status: 403 });
+            return subscriptionErrorResponse(request, 403, '订阅链接无效', '这个订阅链接的凭证不正确，可能已被更换。请联系管理员重新获取订阅链接。');
         }
         const profile = allProfiles.find(p => (p.customId && p.customId === profileIdentifier) || p.id === profileIdentifier);
         if (profile && profile.enabled) {
@@ -1127,12 +1558,12 @@ async function handleMisubRequest(context) {
             effectiveSubConverter = profile.subConverter && profile.subConverter.trim() !== '' ? profile.subConverter : config.subConverter;
             effectiveSubConfig = profile.subConfig && profile.subConfig.trim() !== '' ? profile.subConfig : config.subConfig;
         } else {
-            return new Response('Profile not found or disabled', { status: 404 });
+            return subscriptionErrorResponse(request, 404, '订阅组不存在或已停用', '这个订阅组已被删除或暂时停用。请联系管理员确认订阅状态。');
         }
     } else {
         // [修正] 使用 config 變量
         if (!token || token !== config.mytoken) {
-            return new Response('Invalid Token', { status: 403 });
+            return subscriptionErrorResponse(request, 403, '订阅链接无效', '这个订阅链接的凭证不正确，可能已被更换。请联系管理员重新获取订阅链接。');
         }
         targetMisubs = allMisubs.filter(s => s.enabled);
         // [修正] 使用 config 變量
@@ -1141,7 +1572,8 @@ async function handleMisubRequest(context) {
     }
 
     if (!effectiveSubConverter || effectiveSubConverter.trim() === '') {
-        return new Response('Subconverter backend is not configured.', { status: 500 });
+        console.error('[MiSub] subConverter 未配置，无法进行格式转换');
+        return subscriptionErrorResponse(request, 500, '服务未配置完成', '订阅转换后端尚未配置，请联系管理员在设置中填写 SubConverter 后端地址。');
     }
 
     let targetFormat = url.searchParams.get('target');
@@ -1190,7 +1622,9 @@ async function handleMisubRequest(context) {
     }
     if (!targetFormat) { targetFormat = 'base64'; }
 
-    if (!url.searchParams.has('callback_token')) {
+    // 订阅访问通知默认关闭：客户端（Clash / Shadowrocket 等）会按自己的周期
+    // 自动拉取订阅，开启后 TG 里会被「订阅被访问」刷屏。需要审计时再在设置里打开。
+    if (config.notifyOnSubAccess && !url.searchParams.has('callback_token')) {
         const clientIp = request.headers.get('CF-Connecting-IP') || 'N/A';
         const country = request.headers.get('CF-IPCountry') || 'N/A';
         const domain = url.hostname;
@@ -1349,9 +1783,48 @@ async function handleMisubRequest(context) {
         responseHeaders.set('Cache-Control', 'no-store, no-cache');
         return new Response(responseText, { status: subconverterResponse.status, statusText: subconverterResponse.statusText, headers: responseHeaders });
     } catch (error) {
-        console.error(`[MiSub Final Error] ${error.message}`);
-        return new Response(`Error connecting to subconverter: ${error.message}`, { status: 502 });
+        // 上游的具体错误只写日志，不回给订阅使用者
+        console.error(`[MiSub Final Error] subconverter=${effectiveSubConverter} target=${targetFormat}: ${error.message}`);
+        return subscriptionErrorResponse(request, 502, '订阅暂时无法生成', '订阅转换服务当前不可用，请稍后重试。如果持续失败，请联系管理员检查 SubConverter 后端。');
     }
+}
+
+/**
+ * 面向订阅使用者（可能是客户）的错误响应。
+ * 浏览器打开时给一个能看懂的中文页面，代理客户端拉取时给简短纯文本；
+ * 具体的技术细节只写进日志，不回给调用方。
+ * @param {Request} request
+ * @param {number} status
+ * @param {string} title
+ * @param {string} detail
+ */
+function subscriptionErrorResponse(request, status, title, detail) {
+    const accept = request.headers.get('Accept') || '';
+    const wantsHtml = accept.includes('text/html');
+    if (!wantsHtml) {
+        return new Response(`${title}\n${detail}\n`, {
+            status,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store, no-cache' }
+        });
+    }
+    const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)}</title>
+<style>
+:root{color-scheme:light dark}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f3f4f6;color:#1f2937;padding:24px}
+.card{max-width:26rem;width:100%;background:#fff;border-radius:16px;padding:32px;box-shadow:0 10px 30px rgba(0,0,0,.08);text-align:center}
+h1{font-size:1.25rem;margin:0 0 12px}
+p{font-size:.9rem;line-height:1.7;color:#6b7280;margin:0}
+.code{margin-top:20px;font-size:.75rem;color:#9ca3af}
+@media (prefers-color-scheme:dark){body{background:#030712;color:#f9fafb}.card{background:#111827;box-shadow:none;outline:1px solid #1f2937}p{color:#9ca3af}}
+</style></head><body><div class="card"><h1>${esc(title)}</h1><p>${esc(detail)}</p><div class="code">MiSub · ${status}</div></div></body></html>`;
+    return new Response(html, {
+        status,
+        headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, no-cache' }
+    });
 }
 
 async function getCallbackToken(env) {
@@ -1376,7 +1849,8 @@ export async function onRequest(context) {
 
     if (url.pathname.startsWith('/api/')) {
         const response = await handleApiRequest(request, env);
-        return response;
+        // 会话滑动续期：持续使用的用户不会在 8 小时整点被突然登出
+        return await withRenewedSession(request, env, response);
     }
     const isStaticAsset = /^\/(assets|@vite|src)\/./.test(url.pathname) || /\.\w+$/.test(url.pathname);
     if (!isStaticAsset && url.pathname !== '/') {

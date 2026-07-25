@@ -11,7 +11,7 @@ const props = defineProps({
   isSorting: Boolean,
 });
 
-const emit = defineEmits(['add', 'delete', 'changePage', 'updateNodeCount', 'edit', 'toggleSort', 'markDirty']);
+const emit = defineEmits(['add', 'delete', 'changePage', 'updateNodeCount', 'edit', 'toggleSort', 'markDirty', 'deleteAll']);
 
 const subsMoreMenuRef = ref(null);
 const showSubsMoreMenu = ref(false);

@@ -80,6 +80,9 @@ MiSub 不仅仅是一个简单的订阅转换工具，它经过了深度的架�
 
 本项目天生为 Cloudflare Pages 设计，可以一键部署。
 
+> 📘 **要更新现有部署，或给客户单独开一套完全独立的部署（独立 KV + D1）？**
+> 请看 **[DEPLOY.md](./DEPLOY.md)**，里面有分步骤说明和独立性检查清单。
+
 #### 1. Fork 本仓库
 
 将此项目 Fork 到你自己的 GitHub 账户下。
@@ -173,4 +176,4 @@ wrangler d1 execute misub --file=schema.sql --remote
 
 ### License
 
-[MIT](https://www.google.com/search?q=./LICENSE\&authuser=2)
+[MIT](./LICENSE)

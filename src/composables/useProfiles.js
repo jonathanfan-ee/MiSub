@@ -1,5 +1,6 @@
 import { ref } from 'vue';
-import { useToastStore } from '../stores/toast';
+import { useToastStore } from '../stores/toast.js';
+import { copyText } from '../lib/utils.js';
 
 export function useProfiles(initialProfiles, markDirty, config) {
   const { showToast } = useToastStore();
@@ -77,18 +78,30 @@ export function useProfiles(initialProfiles, markDirty, config) {
     showDeleteProfilesModal.value = false;
   };
 
-  const copyProfileLink = (profileId) => {
+  /** 构造订阅组的分享链接，配置不全时返回 null。 */
+  const getProfileLink = (profileId) => {
+    const token = config.value?.profileToken;
+    if (!token || token === 'auto' || !token.trim()) return null;
+    const profile = profiles.value.find(p => p.id === profileId);
+    if (!profile) return null;
+    return `${window.location.origin}/${token}/${profile.customId || profile.id}`;
+  };
+
+  const copyProfileLink = async (profileId) => {
     const token = config.value?.profileToken;
     if (!token || token === 'auto' || !token.trim()) {
       showToast('请在设置中配置一个固定的“订阅组分享Token”', 'error');
       return;
     }
-    const profile = profiles.value.find(p => p.id === profileId);
-    if (!profile) return;
-    const identifier = profile.customId || profile.id;
-    const link = `${window.location.origin}/${token}/${identifier}`;
-    navigator.clipboard.writeText(link);
-    showToast('订阅组分享链接已复制！', 'success');
+    const link = getProfileLink(profileId);
+    if (!link) return;
+    // 必须 await 并判断结果：http/IP 访问时 navigator.clipboard 不存在，
+    // 之前会直接抛异常但仍然提示「已复制」。
+    if (await copyText(link)) {
+      showToast('订阅组分享链接已复制！', 'success');
+    } else {
+      showToast('自动复制失败，请手动复制链接', 'error');
+    }
   };
 
   const cleanupSubscriptions = (subId) => {
@@ -129,6 +142,7 @@ export function useProfiles(initialProfiles, markDirty, config) {
     handleDeleteProfile,
     handleDeleteAllProfiles,
     copyProfileLink,
+    getProfileLink,
     cleanupSubscriptions,
     cleanupNodes,
     cleanupAllSubscriptions,

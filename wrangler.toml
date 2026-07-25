@@ -1,29 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MiSub — 本地开发配置（wrangler pages dev）
+#
+# ⚠️ 重要：这个文件不参与线上部署。
+#   本项目部署在 Cloudflare Pages 上，线上的 KV / D1 绑定和环境变量都在
+#   Cloudflare 控制台的「设置 → 函数 / 环境变量」里配置，与本文件无关。
+#
+# ⚠️ 请勿在本文件中添加 `pages_build_output_dir`。
+#   一旦加上它，Cloudflare Pages 就会改用本文件作为权威配置并**忽略控制台里的
+#   绑定设置**，本文件里的占位 ID 会让线上的 KV / D1 绑定全部失效。
+#
+# ⚠️ 请勿把真实密码 / 密钥写进本文件（它会被提交到 Git）。
+#   本地开发所需的密钥请写在 .dev.vars 里（已在 .gitignore 中忽略），
+#   格式参考 .dev.vars.example。
+# ─────────────────────────────────────────────────────────────────────────────
+
 name = "misub"
 main = "functions/[[path]].js"
 compatibility_date = "2024-06-13"
 
 # KV 命名空间绑定
-# 这是 wrangler.toml 在Pages项目中最重要的作用
+# 变量名必须是 MISUB_KV（代码里读的是 env.MISUB_KV）。
+# 下面是占位值 —— 原来这里填的是上游作者账号下的 ID，对你的账号无效。
+# 创建自己的：npx wrangler kv namespace create MISUB_KV
 [[kv_namespaces]]
 binding = "MISUB_KV"
-id = "9796c49ed5a3405aabbbc066d4686ce3" # 请确保这里是你正确的 KV ID
-preview_id = "db1e91b764d14234b38c0a233878b040" # 请确保这里是你正确的预览 KV ID
+id = "0000000000000000000000000000000000"          # ← 替换为你自己的 KV namespace ID
+preview_id = "0000000000000000000000000000000000"  # ← 替换为你自己的预览 KV namespace ID
 
-# D1 数据库绑定
-# 用于替代 KV 存储，解决写入限制问题
+# D1 数据库绑定（可选，用于替代 KV、规避写入频率限制）
+# 变量名必须是 MISUB_DB（代码里读的是 env.MISUB_DB）。
+# 创建自己的：npx wrangler d1 create <你的数据库名>
 [[d1_databases]]
 binding = "MISUB_DB"
 database_name = "misub"
-database_id = "5aecdda9-2803-4d9e-a2f6-ccf436ca34e6" # 请替换为您的 D1 数据库 ID
-preview_database_id = "5aecdda9-2803-4d9e-a2f6-ccf436ca34e6" # 请替换为您的预览 D1 数据库 ID
+database_id = "00000000-0000-0000-0000-000000000000"          # ← 替换为你自己的 D1 database ID
+preview_database_id = "00000000-0000-0000-0000-000000000000"  # ← 替换为你自己的 D1 database ID
 
-# 你也可以在这里定义环境变量，但更推荐在Cloudflare控制面板设置
-[vars]
-ADMIN_PASSWORD = "admin"
-COOKIE_SECRET = "a_very_long_random_secret_string"
+# 注意：ADMIN_PASSWORD 与 COOKIE_SECRET 不在这里配置。
+#   · 线上：Cloudflare 控制台 →「设置 → 环境变量」（生产环境和预览环境都要加）
+#   · 本地：写在 .dev.vars 文件里
+# 之前这里写着 ADMIN_PASSWORD = "admin"，等于把默认管理员密码提交进了公开仓库。
 
-[triggers]
-# "*/30" 表示每30分鐘
-# "0 */6 * * *" 表示每6小時
-# 根據您的需要調整 cron 表達式
-crons = ["0 */6 * * *"] 
+# 关于定时刷新流量 / 到期时间：
+#   Cloudflare Pages Functions **不支持** cron 触发器，原来的 [triggers] 配置
+#   对 Pages 项目完全无效（配了每 6 小时一次，但从未真正执行过）。
+#   现在改为在仪表盘上提供「刷新全部」按钮手动刷新。
+#   如果确实需要自动定时刷新，可以用外部定时服务（如 cron-job.org）定期访问
+#   订阅链接，或另建一个 Cloudflare Worker 定时调用本项目的 API。

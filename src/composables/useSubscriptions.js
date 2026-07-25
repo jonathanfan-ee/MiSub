@@ -70,6 +70,11 @@ export function useSubscriptions(initialSubsRef, markDirty) {
 
     try {
       const data = await fetchNodeCount(subToUpdate.url, subToUpdate.id);
+      // 兑现「订阅名称不填将自动获取」：优先用机场声明的名称，
+      // 后端取不到时会退回主机名，总之不再留下「未命名订阅」。
+      if ((!subToUpdate.name || !subToUpdate.name.trim()) && data.name) {
+        subToUpdate.name = data.name;
+      }
       subToUpdate.nodeCount = data.count || 0;
       subToUpdate.userInfo = data.userInfo || null;
       if (typeof data.cachedAt !== 'undefined') {
@@ -109,16 +114,25 @@ export function useSubscriptions(initialSubsRef, markDirty) {
   function updateSubscription(updatedSub) {
     const index = subscriptions.value.findIndex(s => s.id === updatedSub.id);
     if (index !== -1) {
-      if (subscriptions.value[index].url !== updatedSub.url) {
+      const urlChanged = subscriptions.value[index].url !== updatedSub.url;
+      if (urlChanged) {
         updatedSub.nodeCount = 0;
         // URL 变更时清空缓存，以避免使用旧缓存
         updatedSub.cachedRaw = '';
         updatedSub.cachedAt = null;
         updatedSub.cachedFromUrl = null;
-        handleUpdateNodeCount(updatedSub.id); // URL 變更時自動更新單個
+        updatedSub.cachedRawPresent = false;
+        updatedSub.userInfo = null;
       }
+      // 必须先把新对象写进数组，再触发刷新。
+      // 之前的顺序相反：handleUpdateNodeCount 会通过 id 从数组里取到「旧」对象，
+      // 于是请求发的是旧 URL，拿到的结果又写在随后被替换掉的旧对象上 ——
+      // 改完地址点保存，节点数和流量永远不更新。
       subscriptions.value[index] = updatedSub;
       markDirty();
+      if (urlChanged) {
+        handleUpdateNodeCount(updatedSub.id); // URL 變更時自動更新單個
+      }
     }
   }
 
@@ -134,6 +148,55 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     subscriptions.value = [];
     subsCurrentPage.value = 1;
     markDirty();
+  }
+
+  /**
+   * 把后端批量更新的结果合并回本地列表。
+   * 后端现在会连缓存元信息一起回传，必须一并写回 —— 否则前端保存时的整表覆盖
+   * 会把后端刚写入的 cachedRaw 抹掉，「实时拉取」关闭后就没有兜底数据了。
+   */
+  function applyBatchResults(results) {
+    (results || []).forEach(r => {
+      if (!r || !r.success) return;
+      const sub = subscriptions.value.find(s => s.id === r.id);
+      if (!sub) return;
+      sub.nodeCount = r.nodeCount ?? sub.nodeCount;
+      if (r.userInfo) sub.userInfo = r.userInfo;
+      if (typeof r.cachedRaw === 'string') sub.cachedRaw = r.cachedRaw;
+      if (typeof r.cachedAt !== 'undefined' && r.cachedAt !== null) sub.cachedAt = r.cachedAt;
+      if (typeof r.cachedFromUrl !== 'undefined' && r.cachedFromUrl !== null) sub.cachedFromUrl = r.cachedFromUrl;
+      if (typeof r.cachedRawPresent !== 'undefined') sub.cachedRawPresent = !!r.cachedRawPresent;
+    });
+  }
+
+  /**
+   * 一键刷新全部启用的机场订阅。
+   * Cloudflare Pages Functions 不支持 cron 触发（wrangler.toml 里的 [triggers]
+   * 对 Pages 项目无效），所以流量/到期信息不会自动刷新 —— 这里提供一个手动入口。
+   */
+  async function refreshAllSubscriptions() {
+    const targets = subscriptions.value.filter(s => s.enabled && s.url && s.url.startsWith('http'));
+    if (targets.length === 0) {
+      showToast('没有已启用的机场订阅需要刷新', 'info');
+      return;
+    }
+    targets.forEach(s => { s.isUpdating = true; });
+    showToast(`正在刷新 ${targets.length} 个订阅的流量与节点数...`, 'info');
+    try {
+      const result = await batchUpdateNodes(targets.map(s => s.id));
+      if (result.success) {
+        applyBatchResults(result.results);
+        markDirty();
+        showToast(result.message || '刷新完成，请点击保存更改', 'success');
+      } else {
+        showToast(result.message || '刷新失败', 'error');
+      }
+    } catch (e) {
+      console.error('refreshAllSubscriptions failed:', e);
+      showToast('刷新失败，请检查网络后重试', 'error');
+    } finally {
+      targets.forEach(s => { s.isUpdating = false; });
+    }
   }
 
   // {{ AURA-X: Modify - 使用批量更新API优化批量导入. Approval: 寸止(ID:1735459200). }}
@@ -152,18 +215,8 @@ export function useSubscriptions(initialSubsRef, markDirty) {
         const result = await batchUpdateNodes(subsToUpdate.map(sub => sub.id));
 
         if (result.success) {
-          // 更新本地数据
-          result.results.forEach(updateResult => {
-            if (updateResult.success) {
-              const sub = subscriptions.value.find(s => s.id === updateResult.id);
-              if (sub) {
-                sub.nodeCount = updateResult.nodeCount;
-                // userInfo会在下次数据同步时更新
-              }
-            }
-          });
-
-          const successCount = result.results.filter(r => r.success).length;
+          applyBatchResults(result.results);
+          const successCount = (result.results || []).filter(r => r.success).length;
           showToast(`批量更新完成！成功更新 ${successCount}/${subsToUpdate.length} 个订阅`, 'success');
           markDirty(); // 标记需要保存
         } else {
@@ -205,5 +258,6 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     deleteAllSubscriptions,
     addSubscriptionsFromBulk,
     handleUpdateNodeCount,
+    refreshAllSubscriptions,
   };
 }

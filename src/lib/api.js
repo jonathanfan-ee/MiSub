@@ -1,6 +1,32 @@
 //
 // src/lib/api.js
 //
+
+// --- 会话过期的全局通知 ---
+// 会话有 8 小时有效期。页面开着过夜后，任何一次写操作都会返回 401，
+// 而之前前端只是把后端的英文 "Unauthorized" 原样弹成一个 toast，
+// 用户既不知道是登录过期，也只能刷新页面重新登录（未保存的改动全部丢失）。
+// 现在统一在这里捕获 401，通知上层弹出「就地重新登录」对话框。
+let onUnauthorized = null;
+
+/** 注册 401 回调（由 session store 调用）。 */
+export function setUnauthorizedHandler(handler) {
+  onUnauthorized = handler;
+}
+
+/**
+ * 统一处理响应：遇到 401 时触发全局回调。
+ * @param {Response} response
+ * @returns {boolean} 是否为未授权
+ */
+function checkUnauthorized(response) {
+  if (response && response.status === 401) {
+    if (onUnauthorized) onUnauthorized();
+    return true;
+  }
+  return false;
+}
+
 export async function fetchInitialData() {
     try {
         const response = await fetch('/api/data');
@@ -45,6 +71,10 @@ export async function saveMisubs(misubs, profiles) {
             body: JSON.stringify({ misubs, profiles })
         });
 
+        if (checkUnauthorized(response)) {
+            return { success: false, message: '登录已过期，请重新登录后再次保存（你的修改仍保留在页面上）' };
+        }
+
         // 检查HTTP状态码
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -74,6 +104,7 @@ export async function fetchNodeCount(subUrl, id) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: subUrl, id })
         });
+        if (checkUnauthorized(res)) return { count: 0, userInfo: null };
         const data = await res.json();
         return data; // [修正] 直接返回整个对象 { count, userInfo }
     } catch (e) {
@@ -100,6 +131,10 @@ export async function saveSettings(settings) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(settings)
         });
+
+        if (checkUnauthorized(response)) {
+            return { success: false, message: '登录已过期，请重新登录后重试' };
+        }
 
         // 检查HTTP状态码
         if (!response.ok) {
@@ -136,6 +171,10 @@ export async function batchUpdateNodes(subscriptionIds) {
             body: JSON.stringify({ subscriptionIds })
         });
 
+        if (checkUnauthorized(response)) {
+            return { success: false, message: '登录已过期，请重新登录后重试' };
+        }
+
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             const errorMessage = errorData.message || errorData.error || `服务器错误 (${response.status})`;
@@ -160,6 +199,10 @@ export async function migrateToD1() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
         });
+
+        if (checkUnauthorized(response)) {
+            return { success: false, message: '登录已过期，请重新登录后重试' };
+        }
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
