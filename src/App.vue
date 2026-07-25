@@ -1,8 +1,8 @@
 <script setup>
 import { onMounted } from 'vue';
-import { useThemeStore } from './stores/theme';
-import { useSessionStore } from './stores/session';
-import { useToastStore } from './stores/toast';
+import { useThemeStore } from './stores/theme.js';
+import { useSessionStore } from './stores/session.js';
+import { useToastStore } from './stores/toast.js';
 import { storeToRefs } from 'pinia';
 
 import Dashboard from './components/Dashboard.vue';
@@ -11,6 +11,7 @@ import Login from './components/Login.vue';
 import Header from './components/Header.vue';
 import Toast from './components/Toast.vue';
 import Footer from './components/Footer.vue';
+import ReauthModal from './components/ReauthModal.vue';
 
 const themeStore = useThemeStore();
 const { theme } = storeToRefs(themeStore);
@@ -48,7 +49,9 @@ onMounted(() => {
       <Login v-else :login="login" />
     </main>
     
-    <Toast :show="toastState.id" :message="toastState.message" :type="toastState.type" />
+    <Toast />
+    <!-- 会话过期时叠在页面之上，Dashboard 不卸载，未保存的修改得以保留 -->
+    <ReauthModal />
     <Footer />
   </div>
 </template>

@@ -1,0 +1,16 @@
+# 本地开发用的环境变量示例
+#
+# 使用方法：把本文件复制为 .dev.vars（该文件已被 .gitignore 忽略，不会提交）
+#     cp .dev.vars.example .dev.vars
+#
+# 线上部署不读这个文件 —— 生产环境请在 Cloudflare 控制台
+# 「Workers & Pages → 你的项目 → 设置 → 环境变量」中配置同名变量，
+# 并且**生产环境和预览环境都要加**（预览环境缺少 ADMIN_PASSWORD 时无法登录）。
+
+# 管理员登录密码。必填。
+# 未设置时后端会直接拒绝所有登录请求（返回 503），而不是放行。
+ADMIN_PASSWORD=change-me-to-a-strong-password
+
+# 用于签名会话 Cookie 的密钥。必填，且必须足够长且随机。
+# 生成一个：openssl rand -hex 32
+COOKIE_SECRET=replace-with-a-64-char-random-hex-string

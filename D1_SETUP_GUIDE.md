@@ -42,22 +42,27 @@ preview_database_id = "your-actual-database-id-here"  # 同样替换为实际的
 
 ```bash
 # 执行数据库初始化脚本
-wrangler d1 execute misub --file=schema.sql
+# ⚠️ 必须带 --remote，否则只会写到本地 sqlite 文件，线上 D1 依然是空的
+wrangler d1 execute misub --file=schema.sql --remote
 ```
 
-**如果您已经创建过数据库但遇到表结构问题，请执行修复脚本：**
+验证建表成功：
 
 ```bash
-# 修复现有数据库表结构
-wrangler d1 execute misub --file=fix_d1_schema.sql
+wrangler d1 execute misub --remote \
+  --command="SELECT name FROM sqlite_master WHERE type='table';"
 ```
+
+应当看到 `subscriptions`、`profiles`、`settings` 三张表。
 
 ### 4. 部署应用
 
 ```bash
-# 构建并部署
-npm run build
-wrangler pages deploy
+# 方式一（推荐）：推送到 Git，Cloudflare Pages 自动构建部署
+git push origin main
+
+# 方式二：手动部署
+npm run deploy
 ```
 
 ## 🔧 使用方法
@@ -101,7 +106,7 @@ wrangler pages deploy
 ### 常见问题
 
 **Q: 创建数据库时提示权限错误**
-A: 确保您已登录 Cloudflare 账户：`wrangler auth login`
+A: 确保您已登录 Cloudflare 账户：`npx wrangler login`
 
 **Q: 部署后无法访问 D1 数据库**
 A: 检查 `wrangler.toml` 中的数据库 ID 是否正确
@@ -113,10 +118,11 @@ A: 检查 D1 数据库是否正确配置，并查看浏览器控制台的错误�
 A: 不同存储类型的数据是独立的，切换前请先进行数据迁移
 
 **Q: 数据迁移时出现 "table settings has no column named id" 错误**
-A: 这是数据库表结构问题，请执行修复脚本：
+A: 这是表结构不对（settings 表用的是 key/value 两列，不是 id）。重新执行一次建表脚本即可：
 ```bash
-wrangler d1 execute misub --file=fix_d1_schema.sql
+wrangler d1 execute misub --file=schema.sql --remote
 ```
+schema.sql 里全部是 `CREATE TABLE IF NOT EXISTS`，重复执行是安全的。
 
 **Q: 保存设置时提示 "保存设置失败"**
 A: 这通常是因为 KV 写入限制或存储类型配置问题：
@@ -135,6 +141,10 @@ wrangler d1 list
 # 查询数据库表
 wrangler d1 execute misub --command="SELECT name FROM sqlite_master WHERE type='table';"
 ```
+
+## 🆕 要给客户单独开一套部署？
+
+请看 [DEPLOY.md](./DEPLOY.md) —— 里面有完整的「独立 KV + D1」步骤和独立性检查清单。
 
 ## 📞 支持
 

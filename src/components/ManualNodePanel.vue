@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
 import draggable from 'vuedraggable';
 import ManualNodeCard from './ManualNodeCard.vue';
 import ManualNodeList from './ManualNodeList.vue';
@@ -7,6 +7,7 @@ import ManualNodeList from './ManualNodeList.vue';
 const props = defineProps({
   manualNodes: Array,
   paginatedManualNodes: Array,
+  filteredCount: Number,
   currentPage: Number,
   totalPages: Number,
   isSorting: Boolean,
@@ -16,140 +17,40 @@ const props = defineProps({
 
 const emit = defineEmits([
   'add', 'delete', 'edit', 'changePage', 'update:searchTerm', 'update:viewMode',
-  'toggleSort', 'markDirty', 'autoSort', 'deduplicate', 'import'
+  'toggleSort', 'markDirty', 'autoSort', 'deduplicate', 'import', 'deleteAll'
 ]);
 
 const nodesMoreMenuRef = ref(null);
 const showNodesMoreMenu = ref(false);
+
+// --- 搜索：受控组件 ---
+// 这里以前自己维护了一整套 searchTerm / currentPage / filteredNodes / paginatedNodes，
+// 和父组件的 useManualNodes 各算一份。结果是：不搜索时点「下一页」只让父组件的页码前进，
+// 渲染用的却是本地永远停在第 1 页的切片 —— 第 25 个及以后的节点根本翻不到。
+// 现在搜索词和分页都交给父组件（useManualNodes）统一持有。
 const localSearchTerm = ref(props.searchTerm || '');
+let searchDebounce = null;
 
-// 简化搜索逻辑 - 直接在组件内处理
-import { computed } from 'vue';
-
-// 在组件内部直接计算过滤结果
-const filteredNodes = computed(() => {
-  if (!localSearchTerm.value) {
-    return props.manualNodes;
-  }
-  
-  const searchQuery = localSearchTerm.value.toLowerCase().trim();
-  console.log('🔍 组件内搜索:', { searchQuery, totalNodes: props.manualNodes.length });
-  
-  // 国家/地区代码到中文名称的映射
-  const countryCodeMap = {
-    'hk': ['香港', 'hk'],
-    'tw': ['台湾', '臺灣', 'tw'],
-    'sg': ['新加坡', '狮城', 'sg'],
-    'jp': ['日本', 'jp'],
-    'us': ['美国', '美國', 'us'],
-    'kr': ['韩国', '韓國', 'kr'],
-    'gb': ['英国', '英國', 'gb', 'uk'],
-    'de': ['德国', '德國', 'de'],
-    'fr': ['法国', '法國', 'fr'],
-    'ca': ['加拿大', 'ca'],
-    'au': ['澳大利亚', '澳洲', '澳大利亞', 'au'],
-    'cn': ['中国', '大陸', '内地', 'cn'],
-    'my': ['马来西亚', '馬來西亞', 'my'],
-    'th': ['泰国', '泰國', 'th'],
-    'vn': ['越南', 'vn'],
-    'ph': ['菲律宾', '菲律賓', 'ph'],
-    'id': ['印度尼西亚', '印尼', 'id'],
-    'in': ['印度', 'in'],
-    'pk': ['巴基斯坦', 'pk'],
-    'bd': ['孟加拉国', '孟加拉國', 'bd'],
-    'ae': ['阿联酋', '阿聯酋', 'ae'],
-    'sa': ['沙特阿拉伯', 'sa'],
-    'tr': ['土耳其', 'tr'],
-    'ru': ['俄罗斯', '俄羅斯', 'ru'],
-    'br': ['巴西', 'br'],
-    'mx': ['墨西哥', 'mx'],
-    'ar': ['阿根廷', 'ar'],
-    'cl': ['智利', 'cl'],
-    'za': ['南非', 'za'],
-    'eg': ['埃及', 'eg'],
-    'ng': ['尼日利亚', '尼日利亞', 'ng'],
-    'ke': ['肯尼亚', '肯尼亞', 'ke'],
-    'il': ['以色列', 'il'],
-    'ir': ['伊朗', 'ir'],
-    'iq': ['伊拉克', 'iq'],
-    'ua': ['乌克兰', '烏克蘭', 'ua'],
-    'pl': ['波兰', '波蘭', 'pl'],
-    'cz': ['捷克', 'cz'],
-    'hu': ['匈牙利', 'hu'],
-    'ro': ['罗马尼亚', '羅馬尼亞', 'ro'],
-    'gr': ['希腊', '希臘', 'gr'],
-    'pt': ['葡萄牙', 'pt'],
-    'es': ['西班牙', 'es'],
-    'it': ['意大利', 'it'],
-    'nl': ['荷兰', '荷蘭', 'nl'],
-    'be': ['比利时', '比利時', 'be'],
-    'se': ['瑞典', 'se'],
-    'no': ['挪威', 'no'],
-    'dk': ['丹麦', '丹麥', 'dk'],
-    'fi': ['芬兰', '芬蘭', 'fi'],
-    'ch': ['瑞士', 'ch'],
-    'at': ['奥地利', '奧地利', 'at'],
-    'ie': ['爱尔兰', '愛爾蘭', 'ie'],
-    'nz': ['新西兰', '紐西蘭', 'nz'],
-  };
-  
-  const filtered = props.manualNodes.filter(node => {
-    if (!node.name) return false;
-    
-    const nodeName = node.name.toLowerCase();
-    
-    // 直接搜索匹配
-    if (nodeName.includes(searchQuery)) {
-      console.log('✅ 直接匹配:', node.name);
-      return true;
-    }
-    
-    // 国家代码映射匹配
-    const alternativeTerms = countryCodeMap[searchQuery] || [];
-    for (const altTerm of alternativeTerms) {
-      if (nodeName.includes(altTerm.toLowerCase())) {
-        console.log('✅ 地区匹配:', node.name, '匹配词:', altTerm);
-        return true;
-      }
-    }
-    
-    return false;
-  });
-  
-  console.log('🔍 过滤结果:', { filteredCount: filtered.length, names: filtered.map(n => n.name) });
-  return filtered;
+// 输入防抖：大量节点时每敲一个字都全量过滤会明显卡顿
+watch(localSearchTerm, (value) => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => emit('update:searchTerm', value), 200);
 });
 
-// 分页处理
-const currentPage = ref(1);
-const nodesPerPage = 24;
-const totalPages = computed(() => Math.ceil(filteredNodes.value.length / nodesPerPage));
-
-const paginatedNodes = computed(() => {
-  const start = (currentPage.value - 1) * nodesPerPage;
-  const end = start + nodesPerPage;
-  return filteredNodes.value.slice(start, end);
+// 父组件（例如「放弃更改」）重置搜索词时同步回输入框
+watch(() => props.searchTerm, (value) => {
+  if ((value || '') !== localSearchTerm.value) localSearchTerm.value = value || '';
 });
 
-// 监听搜索词变化重置分页
-watch(localSearchTerm, () => {
-  currentPage.value = 1;
-});
+onUnmounted(() => clearTimeout(searchDebounce));
+
+const isSearching = computed(() => !!localSearchTerm.value.trim());
+const matchedCount = computed(() => props.filteredCount ?? props.manualNodes.length);
 
 const handleDelete = (id) => emit('delete', id);
 const handleEdit = (id) => emit('edit', id);
 const handleAdd = () => emit('add');
-const handleChangePage = (page) => {
-  if (localSearchTerm.value) {
-    // 搜索时使用本地分页
-    if (page >= 1 && page <= totalPages.value) {
-      currentPage.value = page;
-    }
-  } else {
-    // 非搜索时使用原来的分页
-    emit('changePage', page);
-  }
-};
+const handleChangePage = (page) => emit('changePage', page);
 const handleSetViewMode = (mode) => emit('update:viewMode', mode);
 const handleToggleSort = () => {
   emit('toggleSort');
@@ -180,9 +81,6 @@ const handleClickOutside = (event) => {
   }
 };
 
-// 在组件挂载和卸载时添加/移除事件监听器
-import { onMounted, onUnmounted } from 'vue';
-
 onMounted(() => {
   document.addEventListener('click', handleClickOutside);
 });
@@ -198,9 +96,8 @@ onUnmounted(() => {
       <div class="flex items-center gap-3">
         <h2 class="text-xl font-bold text-gray-900 dark:text-white">手动节点</h2>
         <span class="px-2.5 py-0.5 text-sm font-semibold text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700/50 rounded-full">{{ manualNodes.length }}</span>
-        <!-- 添加搜索调试信息 -->
-        <span v-if="localSearchTerm" class="px-2.5 py-0.5 text-sm font-semibold text-blue-700 bg-blue-100 dark:text-blue-300 dark:bg-blue-500/20 rounded-full">
-          搜索: "{{ localSearchTerm }}" ({{ filteredNodes.length }}/{{ manualNodes.length }} 结果)
+        <span v-if="isSearching" class="px-2.5 py-0.5 text-sm font-semibold text-blue-700 bg-blue-100 dark:text-blue-300 dark:bg-blue-500/20 rounded-full">
+          匹配 {{ matchedCount }} / {{ manualNodes.length }}
         </span>
       </div>
       <div class="flex items-center gap-2 w-full sm:w-auto">
@@ -231,14 +128,14 @@ onUnmounted(() => {
               <button @click="handleImport" class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">导入订阅</button>
               <button @click="handleAutoSort" class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">一键排序</button>
               <button @click="handleDeduplicate" class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">一键去重</button>
-              <button 
-                @click="handleToggleSort" 
-                :disabled="localSearchTerm"
+              <button
+                @click="handleToggleSort"
+                :disabled="isSearching"
                 class="w-full text-left px-4 py-2 text-sm transition-colors"
-                :class="localSearchTerm ? 'text-gray-400 cursor-not-allowed' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'"
+                :class="isSearching ? 'text-gray-400 cursor-not-allowed' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'"
               >
                 {{ isSorting ? '完成排序' : '手动排序' }}
-                {{ localSearchTerm ? ' (搜索时不可用)' : '' }}
+                {{ isSearching ? ' (搜索时不可用)' : '' }}
               </button>
               <div class="border-t border-gray-200 dark:border-gray-700 my-1"></div>
               <button @click="handleDeleteAll" class="w-full text-left px-4 py-2 text-sm text-red-500 hover:bg-red-500/10">清空所有</button>
@@ -249,34 +146,34 @@ onUnmounted(() => {
     </div>
     <div v-if="manualNodes.length > 0">
       <!-- 如果有搜索词，显示搜索提示 -->
-      <div v-if="localSearchTerm && filteredNodes.length === 0" class="text-center py-8 text-gray-500">
+      <div v-if="isSearching && matchedCount === 0" class="text-center py-8 text-gray-500">
         <p>没有找到包含 "{{ localSearchTerm }}" 的节点</p>
       </div>
-      
+
       <div v-if="viewMode === 'card'">
-         <draggable 
-          v-if="isSorting && !localSearchTerm"
-          tag="div" 
-          class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3" 
-          :list="manualNodes" 
-          item-key="id" 
-          animation="300" 
+         <draggable
+          v-if="isSorting && !isSearching"
+          tag="div"
+          class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3"
+          :list="manualNodes"
+          item-key="id"
+          animation="300"
           @end="handleSortEnd"
         >
           <template #item="{ element: node }">
              <div class="cursor-move">
-                <ManualNodeCard 
-                    :node="node" 
-                    @edit="handleEdit(node.id)" 
+                <ManualNodeCard
+                    :node="node"
+                    @edit="handleEdit(node.id)"
                     @delete="handleDelete(node.id)" />
             </div>
           </template>
         </draggable>
         <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-          <div v-for="node in paginatedNodes" :key="node.id">
-            <ManualNodeCard 
-              :node="node" 
-              @edit="handleEdit(node.id)" 
+          <div v-for="node in paginatedManualNodes" :key="node.id">
+            <ManualNodeCard
+              :node="node"
+              @edit="handleEdit(node.id)"
               @delete="handleDelete(node.id)" />
           </div>
         </div>
@@ -284,7 +181,7 @@ onUnmounted(() => {
 
       <div v-if="viewMode === 'list'" class="space-y-2">
           <ManualNodeList
-              v-for="(node, index) in paginatedNodes"
+              v-for="(node, index) in paginatedManualNodes"
               :key="node.id"
               :node="node"
               :index="(currentPage - 1) * 24 + index + 1"
@@ -292,33 +189,18 @@ onUnmounted(() => {
               @delete="handleDelete(node.id)"
           />
       </div>
-      
-      <!-- 分页 - 搜索时使用本地分页，否则使用props -->
-      <div v-if="localSearchTerm && totalPages > 1" class="flex justify-center items-center space-x-4 mt-8 text-sm font-medium">
-        <button 
-          @click="handleChangePage(currentPage - 1)" 
-          :disabled="currentPage === 1" 
+
+      <!-- 分页：搜索与否都用父组件的同一套页码，不再各算一份 -->
+      <div v-if="totalPages > 1 && !isSorting" class="flex justify-center items-center space-x-4 mt-8 text-sm font-medium">
+        <button
+          @click="handleChangePage(currentPage - 1)"
+          :disabled="currentPage === 1"
           class="px-3 py-1 rounded-md disabled:opacity-50 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700"
         >&laquo; 上一页</button>
         <span class="text-gray-500 dark:text-gray-400">第 {{ currentPage }} / {{ totalPages }} 页</span>
-        <button 
-          @click="handleChangePage(currentPage + 1)" 
-          :disabled="currentPage === totalPages" 
-          class="px-3 py-1 rounded-md disabled:opacity-50 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700"
-        >下一页 &raquo;</button>
-      </div>
-      
-      <!-- 非搜索时的原有分页 -->
-      <div v-else-if="!localSearchTerm && props.totalPages > 1 && !isSorting" class="flex justify-center items-center space-x-4 mt-8 text-sm font-medium">
-        <button 
-          @click="handleChangePage(props.currentPage - 1)" 
-          :disabled="props.currentPage === 1" 
-          class="px-3 py-1 rounded-md disabled:opacity-50 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700"
-        >&laquo; 上一页</button>
-        <span class="text-gray-500 dark:text-gray-400">第 {{ props.currentPage }} / {{ props.totalPages }} 页</span>
-        <button 
-          @click="handleChangePage(props.currentPage + 1)" 
-          :disabled="props.currentPage === props.totalPages" 
+        <button
+          @click="handleChangePage(currentPage + 1)"
+          :disabled="currentPage === totalPages"
           class="px-3 py-1 rounded-md disabled:opacity-50 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700"
         >下一页 &raquo;</button>
       </div>

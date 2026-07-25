@@ -23,6 +23,14 @@ dist-ssr
 .settings/
 *.sublime-workspace
 .vscode
+# 本地密钥（绝不能提交）
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+
 # Misc
 .DS_Store
 .specstory/

@@ -92,23 +92,32 @@ button:active {
 
 /* 移动端优化 */
 @media (max-width: 768px) {
-  /* 确保移动端的按钮有足够的点击区域 */
-  button {
+  /* 确保移动端的按钮有足够的点击区域。
+     注意只作用于独立按钮：之前对所有 button 强加 min-width:44px，
+     会把段落里内嵌的文字型按钮（例如提示文案中的「设置」链接）撑变形。 */
+  button:not(.inline-btn) {
     min-height: 44px;
     min-width: 44px;
   }
-  
-  /* 移动端的卡片按钮组更容易操作 */
-  .shrink-0.flex.items-center.gap-1 {
-    gap: 0.5rem;
+  /* 内嵌在文字段落里的按钮保持行内尺寸 */
+  p button,
+  span button,
+  .inline-btn {
+    min-height: 0;
+    min-width: 0;
   }
-  
+
+  /* 移动端的卡片按钮组更容易操作 */
+  .shrink-0.flex.items-center.gap-2 {
+    gap: 0.75rem;
+  }
+
   /* 移动端的按钮图标稍微大一点 */
-  .shrink-0.flex.items-center.gap-1 svg {
+  .shrink-0.flex.items-center.gap-2 svg {
     width: 1.25rem;
     height: 1.25rem;
   }
-  
+
   /* 移动端下拉菜单优化 */
   .absolute.mt-2 {
     z-index: 50;
