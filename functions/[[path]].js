@@ -1,5 +1,5 @@
 import yaml from 'js-yaml';
-import { StorageFactory, DataMigrator, STORAGE_TYPES } from './storage-adapter.js';
+import { StorageFactory, DataMigrator, STORAGE_TYPES, getBinding } from './storage-adapter.js';
 import { generateClashMetaYAML } from './clash-meta-generator.js';
 
 const OLD_KV_KEY = 'misub_data_v1';
@@ -1842,9 +1842,35 @@ async function getCallbackToken(env) {
 }
 
 
+/**
+ * 在入口处把绑定名归一化一次，后续所有代码就都能安心用 env.MISUB_KV / env.MISUB_DB。
+ *
+ * 在 Cloudflare 面板手填绑定变量名时，很容易复制粘贴时带上尾随空格或制表符
+ * （实际踩过：`MISUB_DB\t`）。此时 `env.MISUB_DB` 是 undefined，但面板上显示的
+ * 名字看起来一模一样，几乎无法靠肉眼发现。这里做一次容错并打日志提示改名，
+ * 免得一个不可见字符让整个 D1 存储看起来「绑了却用不了」。
+ * @param {Object} env
+ * @returns {Object} 归一化后的 env（原对象不变）
+ */
+function normalizeBindings(env) {
+    if (!env) return env;
+    const expected = ['MISUB_KV', 'MISUB_DB'];
+    let patched = null;
+    for (const name of expected) {
+        if (env[name]) continue;
+        const alias = getBinding(env, name);
+        if (alias) {
+            patched = patched || { ...env };
+            patched[name] = alias;
+        }
+    }
+    return patched || env;
+}
+
 // --- [核心修改] Cloudflare Pages Functions 主入口 ---
 export async function onRequest(context) {
-    const { request, env, next } = context;
+    const { request, next } = context;
+    const env = normalizeBindings(context.env);
     const url = new URL(request.url);
 
     // **核心修改：判斷是否為定時觸發**
@@ -1859,7 +1885,8 @@ export async function onRequest(context) {
     }
     const isStaticAsset = /^\/(assets|@vite|src)\/./.test(url.pathname) || /\.\w+$/.test(url.pathname);
     if (!isStaticAsset && url.pathname !== '/') {
-        return handleMisubRequest(context);
+        // 传下去的 context 也要带归一化后的 env
+        return handleMisubRequest(env === context.env ? context : { ...context, env });
     }
     return next();
 }

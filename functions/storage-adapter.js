@@ -13,9 +13,37 @@ export const STORAGE_TYPES = {
 // 数据键映射
 const DATA_KEYS = {
     SUBSCRIPTIONS: 'misub_subscriptions_v1',
-    PROFILES: 'misub_profiles_v1', 
+    PROFILES: 'misub_profiles_v1',
     SETTINGS: 'worker_settings_v1'
 };
+
+/**
+ * 按名称取绑定，并容忍名称里多余的空白字符。
+ *
+ * 在 Cloudflare 面板里手填绑定变量名时，很容易从文档或表格里复制粘贴时带上
+ * 尾随的空格或制表符（例如 "MISUB_DB\t"）。这时 `env.MISUB_DB` 是 undefined，
+ * 而面板上显示的名字看起来完全正确 —— 排查起来非常费时。
+ * 这里在精确匹配失败后，再按「去掉空白后相等」找一次，并打日志提示改名。
+ *
+ * @param {Object} env Cloudflare 环境对象
+ * @param {string} name 期望的绑定变量名
+ * @returns {any} 绑定对象，找不到返回 undefined
+ */
+export function getBinding(env, name) {
+    if (!env) return undefined;
+    if (env[name]) return env[name];
+
+    for (const key of Object.keys(env)) {
+        if (key !== name && key.trim() === name) {
+            console.warn(
+                `[Storage] 绑定「${JSON.stringify(key)}」的名称含多余空白字符，已按 ${name} 使用。` +
+                `建议到 Cloudflare 项目「设置 → 绑定」把变量名改成 ${name}（不要有前后空格或制表符）。`
+            );
+            return env[key];
+        }
+    }
+    return undefined;
+}
 
 /**
  * KV 存储适配器
