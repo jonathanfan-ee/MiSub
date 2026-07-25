@@ -671,7 +671,9 @@ async function handleApiRequest(request, env) {
             if (!env.MISUB_DB) {
                 return new Response(JSON.stringify({
                     success: false,
-                    message: 'D1 数据库未配置，请检查 wrangler.toml 配置'
+                    // 不要把人指向 wrangler.toml —— Pages 项目根本不读它，
+                    // 线上绑定在控制台配置，而且面板里新加的绑定必须重新部署才生效。
+                    message: '未绑定 D1 数据库（MISUB_DB）。请在 Cloudflare 项目的「设置 → 绑定」中添加变量名为 MISUB_DB 的 D1 绑定，然后到「部署」里点一次「重试部署」使其生效。'
                 }), { status: 400 });
             }
 
@@ -1239,7 +1241,10 @@ async function handleApiRequest(request, env) {
                         if (requestedType === STORAGE_TYPES.D1 && !env.MISUB_DB) {
                             return new Response(JSON.stringify({
                                 success: false,
-                                message: '未绑定 D1 数据库（MISUB_DB），无法切换到 D1 存储。请先在 Cloudflare 项目设置中添加绑定。'
+                                // 常见情形：绑定其实已经在面板里加好了，只是还没重新部署。
+                                // Pages 的密钥是即时生效的，但绑定必须重新部署才会挂到运行时上，
+                                // 这个不一致很容易让人以为自己配错了。
+                                message: '未绑定 D1 数据库（MISUB_DB），无法切换到 D1 存储。请到 Cloudflare 项目的「设置 → 绑定」添加变量名为 MISUB_DB 的 D1 绑定；如果已经添加过，请到「部署」里点一次「重试部署」—— 面板里新增的绑定需要重新部署才会生效。'
                             }), { status: 400 });
                         }
                         const targetAdapter = StorageFactory.createAdapter(env, requestedType);
