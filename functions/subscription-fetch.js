@@ -50,6 +50,7 @@ export async function fetchSubscriptionText(sub, {
     fetchImpl = fetch,
     timeoutMs = 10000,
     preferClash = false,
+    includeMetadata = false,
 } = {}) {
     const cacheMatchesUrl = !sub.cachedFromUrl || sub.cachedFromUrl === sub.url;
     const cached = cacheMatchesUrl ? decode(sub.cachedRaw || '') : '';
@@ -72,8 +73,15 @@ export async function fetchSubscriptionText(sub, {
             }));
             if (!response.ok) return fallback(`http-${response.status}`);
             const text = decode(await response.text());
+            const userInfo = {};
+            for (const part of (response.headers.get('subscription-userinfo') || '').split(';')) {
+                const [key, value] = part.trim().split('=');
+                if (['upload', 'download', 'total', 'expire'].includes(key) && /^\d+$/.test(value)) userInfo[key] = Number(value);
+            }
             return isUsable(text)
-                ? { text, usedSource: 'live', failure: null }
+                ? { text, usedSource: 'live', failure: null, ...(includeMetadata ? {
+                    userInfo: Object.keys(userInfo).length ? userInfo : null, headers: response.headers,
+                } : {}) }
                 : fallback('unsupported-or-empty-response');
         })();
         const deadline = new Promise((resolve) => {

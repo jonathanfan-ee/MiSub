@@ -97,19 +97,20 @@ export async function saveMisubs(misubs, profiles) {
     }
 }
 
-export async function fetchNodeCount(subUrl, id) {
+export async function fetchNodeCount(subUrl, id, refreshVia) {
     try {
         const res = await fetch('/api/node_count', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: subUrl, id })
+            body: JSON.stringify({ url: subUrl, id, refreshVia })
         });
-        if (checkUnauthorized(res)) return { count: 0, userInfo: null };
+        if (checkUnauthorized(res)) return { success: false, error: '登录已过期' };
+        if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
         const data = await res.json();
         return data; // [修正] 直接返回整个对象 { count, userInfo }
     } catch (e) {
         console.error('fetchNodeCount error:', e);
-        return { count: 0, userInfo: null };
+        return { success: false, error: '网络请求失败' };
     }
 }
 
@@ -122,6 +123,26 @@ export async function fetchSettings() {
         console.error("Failed to fetch settings:", error);
         return {};
     }
+}
+
+export async function collectorRequest(path, value) {
+    const response = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
+    if (checkUnauthorized(response)) throw new Error('登录已过期');
+    const result = await response.json();
+    if (!response.ok || result.success === false) throw new Error(sourceErrorMessage(result.error || '采集任务请求失败'));
+    return result;
+}
+
+export function sourceErrorMessage(code) {
+    return ({
+        'save-collector-source-first': '请先保存固定出口设置，再提交采集任务',
+        'collector-not-configured': '采集器尚未配置完成',
+        'collector-paused-or-source-changed': '采集已暂停或源设置已变化，请确认后恢复',
+        'source-not-found': '请先保存固定出口源设置',
+        'collector-storage-unavailable': '暂时无法读取采集状态，请稍后重试',
+        'source-storage-unavailable': '暂时无法读取订阅数据，请稍后重试',
+        'refresh-in-progress-or-cooldown': '正在刷新或仍处于五分钟冷却期',
+    })[code] || code;
 }
 
 export async function saveSettings(settings) {
@@ -163,12 +184,12 @@ export async function saveSettings(settings) {
  * @param {string[]} subscriptionIds - 要更新的订阅ID数组
  * @returns {Promise<Object>} - 更新结果
  */
-export async function batchUpdateNodes(subscriptionIds) {
+export async function batchUpdateNodes(subscriptionIds, collectorSourceIds = []) {
     try {
         const response = await fetch('/api/batch_update_nodes', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subscriptionIds })
+            body: JSON.stringify({ subscriptionIds, collectorSourceIds })
         });
 
         if (checkUnauthorized(response)) {

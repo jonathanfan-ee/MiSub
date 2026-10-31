@@ -1,10 +1,13 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import Modal from './Modal.vue';
 import { copyText } from '../lib/utils.js';
 import { useToastStore } from '../stores/toast.js';
+import { collectorRequest } from '../lib/api.js';
 
 const props = defineProps({
+  sourceCacheEnabled: Boolean,
+  collectors: { type: Array, default: () => [] },
   misub: {
     type: Object,
     required: true
@@ -12,6 +15,27 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['delete', 'change', 'update', 'edit']);
+
+const fetchMode = computed({
+  get: () => props.misub.refreshVia === 'collector' ? 'collector' : props.misub.fetchPolicy === 'cache-first' ? 'cache-first' : (props.misub.realtimeFetch === false ? 'cache-only' : 'realtime'),
+  set: value => {
+    props.misub.refreshVia = value === 'collector' ? 'collector' : 'pages';
+    if (value === 'collector' && !props.misub.collectorId) props.misub.collectorId = props.collectors[0]?.id || '';
+    props.misub.fetchPolicy = ['cache-first', 'collector'].includes(value) ? 'cache-first' : 'legacy';
+    props.misub.realtimeFetch = !['cache-only', 'collector'].includes(value);
+    emit('change');
+  },
+});
+const cacheFormats = computed(() => ['clash', 'universal'].map(format => ({ format, ...props.misub.cacheStatus?.[format] })));
+const formatAge = ms => ms == null ? '无快照' : ms < 60_000 ? '不足 1 分钟' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)} 分钟` : `${Math.floor(ms / 3_600_000)} 小时`;
+const activeSnapshot = computed(() => (props.misub.refreshVia === 'collector' || props.sourceCacheEnabled) && props.misub.fetchPolicy === 'cache-first'
+  ? props.misub.cacheStatus : null);
+const displayNodeCount = computed(() => activeSnapshot.value?.clash?.lastSuccessAt
+  ? activeSnapshot.value.clash.count : activeSnapshot.value?.universal?.lastSuccessAt
+    ? activeSnapshot.value.universal.count : props.misub.nodeCount);
+const effectiveUserInfo = computed(() => (activeSnapshot.value
+  ? [...cacheFormats.value].sort((a, b) => (b.lastSuccessAt || 0) - (a.lastSuccessAt || 0)).find(status => status.userInfo)?.userInfo
+  : null) || props.misub.userInfo);
 
 const getProtocol = (url) => {
   try {
@@ -48,7 +72,7 @@ const formatBytes = (bytes, decimals = 2) => {
 };
 
 const trafficInfo = computed(() => {
-  const info = props.misub.userInfo;
+  const info = effectiveUserInfo.value;
   const REASONABLE_TRAFFIC_LIMIT_BYTES = 10 * 1024 * 1024 * 1024 * 1024 * 1024; // 10 PB
   if (
     !info ||
@@ -70,7 +94,7 @@ const trafficInfo = computed(() => {
 });
 
 const expiryInfo = computed(() => {
-    const expireTimestamp = props.misub.userInfo?.expire;
+    const expireTimestamp = effectiveUserInfo.value?.expire;
     if (!expireTimestamp) return null;
     const REASONABLE_EXPIRY_LIMIT_DAYS = 365 * 10;
     const expiryDate = new Date(expireTimestamp * 1000);
@@ -127,6 +151,32 @@ const cachedLinesCount = computed(() => {
 });
 
 const { showToast } = useToastStore();
+const isResuming = ref(false);
+let statusTimer;
+const stopStatusTimer = () => { if (statusTimer) clearInterval(statusTimer); statusTimer = null; };
+async function refreshCollectorStatus() {
+  const sourceId = props.misub.id, sourceUrl = props.misub.url;
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sourceUrl));
+    const urlHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    const result = await collectorRequest('collector_status', { sourceId, urlHash });
+    if (props.misub.id === sourceId && props.misub.url === sourceUrl) props.misub.cacheStatus = result.cacheStatus;
+  } catch { /* Keep the last visible status; no upstream fetch or cache mutation. */ }
+}
+watch(() => props.misub.refreshVia === 'collector' && (props.misub.cacheStatus?.collector?.queued || props.misub.cacheStatus?.collector?.refreshing), pending => {
+  stopStatusTimer();
+  if (pending) statusTimer = setInterval(refreshCollectorStatus, 15000);
+}, { immediate: true });
+onUnmounted(stopStatusTimer);
+async function resumeCollection() {
+  isResuming.value = true;
+  try {
+    await collectorRequest('collector_refresh', { sourceId: props.misub.id, resume: true });
+    await refreshCollectorStatus();
+    showToast('采集已恢复并排队；请确认上游已解除限制', 'info');
+  } catch (error) { showToast(error.message, 'error'); }
+  finally { isResuming.value = false; }
+}
 
 const copyCache = async () => {
   // 之前 catch 里什么都不做：复制失败（非 https 环境下 navigator.clipboard 不存在）
@@ -170,12 +220,42 @@ const copyCache = async () => {
     
     <div class="mt-2 grow flex flex-col justify-center space-y-2">
       <input type="text" :value="misub.url" readonly class="w-full text-sm text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800/50 rounded-lg px-3 py-2 focus:outline-hidden font-mono" />
-      <div class="flex items-center gap-2 mt-1 text-xs">
+      <div v-if="!activeSnapshot" class="flex items-center gap-2 mt-1 text-xs">
         <span :class="(misub.cachedRawPresent ?? (misub.cachedRaw && misub.cachedRaw.length > 0)) ? 'text-green-600 dark:text-green-400' : 'text-gray-400'">
           {{ (misub.cachedRawPresent ?? (misub.cachedRaw && misub.cachedRaw.length > 0)) ? '缓存可用' : '无缓存' }}
         </span>
         <span v-if="cachedLinesCount !== null" class="text-gray-400">· {{ cachedLinesCount }} 行</span>
         <span v-if="misub.cachedAt" class="text-gray-400">· {{ new Date(misub.cachedAt).toLocaleString() }}</span>
+      </div>
+      <div v-if="misub.fetchPolicy === 'cache-first'" class="text-xs space-y-1 text-gray-500 dark:text-gray-400">
+        <template v-if="misub.refreshVia === 'collector'">
+          <p>固定出口：{{ misub.collectorId || '尚未选择' }} · 只读快照</p>
+          <p v-if="!sourceCacheEnabled">自动采集已关闭，保留现有快照；手动刷新可排队</p>
+          <p v-if="misub.cacheStatus?.collector?.paused" class="text-amber-600">
+            上游拒绝请求，采集已暂停。
+            <button @click="resumeCollection" :disabled="isResuming" class="underline">恢复采集并排队</button>
+          </p>
+          <p v-else-if="misub.cacheStatus?.collector?.refreshing">正在采集，继续提供上次成功快照</p>
+          <p v-else-if="misub.cacheStatus?.collector?.queued">已排队，等待采集器领取或冷却结束</p>
+          <p v-else-if="misub.cacheStatus?.collector?.nextAttemptAt">下次最早采集：{{ new Date(misub.cacheStatus.collector.nextAttemptAt).toLocaleString() }}</p>
+          <label class="flex items-center gap-2">采集器
+            <select v-model="misub.collectorId" @change="emit('change')" aria-label="固定出口采集器" class="bg-gray-100 dark:bg-gray-800 rounded p-1">
+              <option v-for="collector in collectors" :key="collector.id" :value="collector.id">{{ collector.id }} · {{ collector.expectedIpv4 }}</option>
+            </select>
+          </label>
+          <p>更改后请先保存，再提交采集任务。</p>
+        </template>
+        <p v-else-if="!sourceCacheEnabled">缓存优先未启用，当前使用原拉取策略</p>
+        <p v-else-if="misub.cacheStatus?.error" class="text-amber-600">缓存不可用：{{ misub.cacheStatus.error }}</p>
+        <p v-if="misub.refreshVia === 'collector' && misub.cacheStatus?.error" class="text-amber-600">快照暂不可读：{{ misub.cacheStatus.error }}</p>
+        <template v-if="activeSnapshot && !misub.cacheStatus?.error">
+          <p v-for="status in cacheFormats" :key="status.format" :class="status.warning || status.error ? 'text-amber-600' : ''">
+            {{ status.format === 'clash' ? 'Clash' : '通用链接' }}：{{ status.count || 0 }} 节点 · {{ formatAge(status.ageMs) }}
+            <span v-if="status.lastSuccessAt"> · 成功于 {{ new Date(status.lastSuccessAt).toLocaleString() }}</span>
+            <span v-if="status.warning"> · 超过 24 小时，仍保留可用快照</span>
+            <span v-if="status.error"> · 最近刷新：{{ status.error }}</span>
+          </p>
+        </template>
       </div>
       <div v-if="trafficInfo" class="space-y-1 pt-1">
         <div class="flex justify-between text-xs font-mono"><span class="text-gray-600 dark:text-gray-400">{{ trafficInfo.used }}</span><span class="text-gray-600 dark:text-gray-400">{{ trafficInfo.total }}</span></div>
@@ -193,16 +273,17 @@ const copyCache = async () => {
             </label>
           </div>
           <div v-if="protocol === 'http' || protocol === 'https'" class="flex items-center gap-2">
-            <span class="text-xs text-gray-500 dark:text-gray-400">实时</span>
-            <label class="relative inline-flex items-center cursor-pointer" title="聚合访问时是否实时拉取上游">
-              <input type="checkbox" v-model="misub.realtimeFetch" @change="emit('change')" class="sr-only peer">
-              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-500 peer-checked:bg-indigo-600 dark:peer-checked:bg-green-600"></div>
-            </label>
+            <select v-model="fetchMode" aria-label="订阅拉取策略" title="实时模式失败时使用旧缓存；缓存优先需要本站开关" class="text-xs bg-gray-100 dark:bg-gray-800 rounded px-1 py-1 max-w-28">
+              <option value="realtime">实时拉取</option>
+              <option value="cache-only">仅旧缓存</option>
+              <option value="cache-first" :disabled="!sourceCacheEnabled">缓存优先</option>
+              <option value="collector" :disabled="!collectors.length">固定出口</option>
+            </select>
           </div>
           <span v-if="expiryInfo" class="text-xs font-medium" :class="expiryInfo.style">{{ expiryInfo.daysRemaining }}</span>
         </div>
       <div class="flex items-center space-x-3">
-        <span class="text-sm font-semibold" :class="misub.isUpdating ? 'text-yellow-500 animate-pulse' : 'text-gray-700 dark:text-gray-300'">{{ misub.isUpdating ? '更新中...' : `${misub.nodeCount} Nodes` }}</span>
+        <span class="text-sm font-semibold" :class="misub.isUpdating ? 'text-yellow-500 animate-pulse' : 'text-gray-700 dark:text-gray-300'">{{ misub.isUpdating ? '更新中...' : `${displayNodeCount} Nodes` }}</span>
         <button @click="emit('update')" :disabled="misub.isUpdating" class="text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" title="更新节点数和流量" aria-label="更新节点数和流量"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" :class="{'animate-spin': misub.isUpdating}" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" /></svg></button>
         <button @click="showCacheModal = true" :disabled="!(misub.cachedRawPresent ?? (misub.cachedRaw && misub.cachedRaw.length > 0))" class="text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-40" title="查看缓存"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 5c-7.633 0-11 7-11 7s3.367 7 11 7 11-7 11-7-3.367-7-11-7zm0 12a5 5 0 110-10 5 5 0 010 10zm0-2a3 3 0 100-6 3 3 0 000 6z"/></svg></button>
       </div>

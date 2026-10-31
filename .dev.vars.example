@@ -14,3 +14,7 @@ ADMIN_PASSWORD=change-me-to-a-strong-password
 # 用于签名会话 Cookie 的密钥。必填，且必须足够长且随机。
 # 生成一个：openssl rand -hex 32
 COOKIE_SECRET=replace-with-a-64-char-random-hex-string
+
+# Optional fixed-egress collectors. Register only after deployment approval.
+# Matching VM config uses the same secret. REPLACE placeholders are rejected.
+# MISUB_COLLECTORS='{"dmit-us":{"secret":"REPLACE_WITH_A_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS","expectedIpv4":"203.0.113.10"}}'

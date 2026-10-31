@@ -9,6 +9,8 @@ const props = defineProps({
   currentPage: Number,
   totalPages: Number,
   isSorting: Boolean,
+  sourceCacheEnabled: Boolean,
+  collectors: { type: Array, default: () => [] },
 });
 
 const emit = defineEmits(['add', 'delete', 'changePage', 'updateNodeCount', 'edit', 'toggleSort', 'markDirty', 'deleteAll']);
@@ -85,6 +87,8 @@ onUnmounted(() => {
           <div class="cursor-move">
               <Card 
                   :misub="subscription" 
+                  :source-cache-enabled="sourceCacheEnabled"
+                  :collectors="collectors"
                   @delete="handleDelete(subscription.id)" 
                   @change="handleSortEnd" 
                   @update="handleUpdate(subscription.id)" 
@@ -101,6 +105,8 @@ onUnmounted(() => {
           >   
               <Card 
                   :misub="subscription" 
+                  :source-cache-enabled="sourceCacheEnabled"
+                  :collectors="collectors"
                   @delete="handleDelete(subscription.id)" 
                   @change="handleSortEnd" 
                   @update="handleUpdate(subscription.id)" 

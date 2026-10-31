@@ -2,6 +2,8 @@ import yaml from 'js-yaml';
 import { StorageFactory, DataMigrator, STORAGE_TYPES, getBinding } from './storage-adapter.js';
 import { generateClashMetaYAML } from './clash-meta-generator.js';
 import { fetchSubscriptionText, parseClashProxyList } from './subscription-fetch.js';
+import { createSourceCache, usesSourceCache, countUniversalNodes, isCollectorSource, SnapshotUnavailableError, sourceUrlHash } from './subscription-cache.js';
+import { handleCollectorRequest, publicCollectors, collectorRegistry, queueCollectorSource, collectorSourceStatus } from './collector-api.js';
 
 const OLD_KV_KEY = 'misub_data_v1';
 const KV_KEY_SUBS = 'misub_subscriptions_v1';
@@ -315,6 +317,7 @@ const defaultSettings = {
     NotifyThresholdDays: 3,
     NotifyThresholdPercent: 90,
     storageType: 'kv', // 新增：数据存储类型，默认 KV，可选 'd1'
+    sourceCacheEnabled: false, // 分站启用，默认关闭；还需逐源选择 cache-first
     showTrafficRemainingNode: true, // 是否在聚合顶部插入"流量剩余"虚拟节点
     // 新增：Clash Meta 直接生成模式
     useDirectClashMeta: false, // 是否直接生成 Clash Meta YAML（跳过 subconverter）
@@ -403,6 +406,7 @@ async function handleCronTrigger(env) {
     let changesMade = false;
 
     for (const sub of allSubs) {
+        if (isCollectorSource(sub)) continue;
         if (sub.url.startsWith('http') && sub.enabled) {
             try {
                 // --- 並行請求流量和節點內容 ---
@@ -661,9 +665,56 @@ async function checkAndNotify(sub, settings, env) {
 
 
 // --- 主要 API 請求處理 ---
+async function refreshSourceForAdmin(sub, config, env) {
+    if (isCollectorSource(sub)) {
+        const cache = createSourceCache(env, config, decodeMaybeBase64ToUtf8, { snapshotOnly: true });
+        if (!cache) return { success: false, error: 'cache-requires-d1' };
+        try {
+            const queued = await queueCollectorSource(env, sub);
+            const cacheStatus = await cache.status(sub);
+            cacheStatus.collector = await collectorSourceStatus(env, sub);
+            return { ...queued, cacheStatus, count: cacheStatus.clash.count || cacheStatus.universal.count,
+                userInfo: cacheStatus.clash.userInfo || cacheStatus.universal.userInfo || sub.userInfo || null };
+        } catch { return { success: false, error: 'collector-storage-unavailable' }; }
+    }
+    if (usesSourceCache(sub, config)) {
+        const cache = createSourceCache(env, config, decodeMaybeBase64ToUtf8);
+        if (!cache) return { success: false, error: 'cache-requires-d1' };
+        try {
+            const refreshed = await cache.refresh(sub);
+            const cacheStatus = await cache.status(sub);
+            return { success: refreshed && Object.values(cacheStatus).some(s => s.lastSuccessAt && !s.error),
+                serverCacheOnly: true, cacheStatus, count: cacheStatus.clash.count || cacheStatus.universal.count,
+                userInfo: cacheStatus.clash.userInfo || cacheStatus.universal.userInfo || sub.userInfo || null,
+                error: !refreshed ? 'refresh-in-progress-or-cooldown' : Object.values(cacheStatus).find(s => s.error)?.error };
+        } catch {
+            return { success: false, error: 'cache-storage-unavailable' };
+        }
+    }
+    const options = { decode: decodeMaybeBase64ToUtf8, isUsable: text => countUniversalNodes(text) > 0, includeMetadata: true };
+    const [nodes, traffic] = await Promise.all([
+        fetchSubscriptionText({ url: sub.url }, options),
+        fetchSubscriptionText({ url: sub.url }, { ...options, preferClash: true, isUsable: () => true }),
+    ]);
+    if (nodes.failure) return { success: false, error: nodes.failure };
+    return { success: true, count: countUniversalNodes(nodes.text), cachedRaw: nodes.text,
+        cachedAt: Date.now(), cachedFromUrl: sub.url, cachedRawPresent: true,
+        userInfo: traffic.userInfo || nodes.userInfo || sub.userInfo || null,
+        name: extractSubscriptionName(traffic.headers || nodes.headers, sub.url) };
+}
+
+// Admin refreshes may update legacy inline fields. Background cache refreshes never do.
+function applyLegacyRefresh(sub, result) {
+    if (!result.success || result.serverCacheOnly) return;
+    for (const key of ['cachedRaw', 'cachedAt', 'cachedFromUrl', 'cachedRawPresent', 'userInfo']) sub[key] = result[key];
+    sub.nodeCount = result.count;
+    if (!sub.name?.trim()) sub.name = result.name;
+}
+
 async function handleApiRequest(request, env) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api/, '');
+    if (path.startsWith('/collector/')) return handleCollectorRequest(request, env, { decode: decodeMaybeBase64ToUtf8 });
     // [新增] 数据存储迁移接口 (KV -> D1)
     if (path === '/migrate_to_d1') {
         if (!await authMiddleware(request, env)) {
@@ -820,8 +871,19 @@ async function handleApiRequest(request, env) {
                 const config = {
                     FileName: settings.FileName || 'MISUB',
                     mytoken: settings.mytoken || 'auto',
-                    profileToken: settings.profileToken || 'profiles'
+                    profileToken: settings.profileToken || 'profiles',
+                    sourceCacheEnabled: settings.sourceCacheEnabled === true,
+                    collectors: publicCollectors(env),
                 };
+                const cache = createSourceCache(env, settings, decodeMaybeBase64ToUtf8, { snapshotOnly: misubs.some(isCollectorSource) });
+                await Promise.all(misubs.map(async sub => {
+                    if (!usesSourceCache(sub, settings)) return;
+                    try {
+                        sub.cacheStatus = cache ? await cache.status(sub) : { error: 'cache-requires-d1' };
+                        if (cache && isCollectorSource(sub)) sub.cacheStatus.collector = await collectorSourceStatus(env, sub);
+                    }
+                    catch { sub.cacheStatus = { error: 'cache-storage-unavailable' }; }
+                }));
                 return new Response(JSON.stringify({ misubs, profiles, config }), { headers: { 'Content-Type': 'application/json' } });
             } catch (e) {
                 console.error('[API Error /data]', 'Failed to read from storage:', e);
@@ -871,6 +933,25 @@ async function handleApiRequest(request, env) {
                     settings = defaultSettings; // 使用默认设置继续
                 }
 
+                const fixedSources = misubs.filter(isCollectorSource);
+                if (fixedSources.length) {
+                    const registry = collectorRegistry(env), urls = new Set();
+                    for (const sub of misubs) {
+                        if (!/^https?:\/\//.test(sub.url || '')) continue;
+                        if (urls.has(sub.url) && fixedSources.some(item => item.url === sub.url)) {
+                            return Response.json({ success: false, message: '固定出口订阅地址请只保留一份，再供多个订阅组引用' }, { status: 400 });
+                        }
+                        urls.add(sub.url);
+                    }
+                    for (const sub of fixedSources) {
+                        if (settings.storageType !== 'd1' || sub.fetchPolicy !== 'cache-first' || !/^https:\/\//.test(sub.url || '') || !registry[sub.collectorId]) {
+                            return Response.json({ success: false, message: '固定出口源需要 HTTPS 地址、D1 缓存和已登记的采集器' }, { status: 400 });
+                        }
+                    }
+                    try { await getBinding(env, 'MISUB_DB').prepare('SELECT source_id FROM collector_jobs LIMIT 0').all(); }
+                    catch { return Response.json({ success: false, message: '请先审核并执行固定出口任务表迁移' }, { status: 400 }); }
+                }
+
                 // 步骤5: 处理通知。
                 // 必须在保存之前 await：checkAndNotify 会在 sub 上写入 lastNotifiedExpire /
                 // lastNotifiedTraffic 去重时间戳。之前是「不等待」，于是时间戳几乎总是
@@ -896,7 +977,7 @@ async function handleApiRequest(request, env) {
                 try {
                     const storageAdapter = await getStorageAdapter(env);
                     await Promise.all([
-                        storageAdapter.put(KV_KEY_SUBS, misubs),
+                        storageAdapter.put(KV_KEY_SUBS, misubs.map(({ cacheStatus, ...sub }) => sub)),
                         storageAdapter.put(KV_KEY_PROFILES, profiles)
                     ]);
                 } catch (storageError) {
@@ -923,123 +1004,58 @@ async function handleApiRequest(request, env) {
 
         case '/node_count': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-            let subUrl, subId;
             try {
-                const body = await request.json();
-                subUrl = body?.url;
-                subId = body?.id;
-            } catch (e) {
-                return new Response(JSON.stringify({ error: '请求格式错误' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+                const { url: subUrl, id, refreshVia } = await request.json();
+                if (typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
+                    return Response.json({ error: 'Invalid or missing url' }, { status: 400 });
+                }
+                const storage = await getStorageAdapter(env);
+                const settings = { ...defaultSettings, ...await storage.get(KV_KEY_SETTINGS) };
+                const stored = await storage.get(KV_KEY_SUBS);
+                if (!Array.isArray(stored)) return Response.json({ success: false, error: 'source-storage-unavailable' }, { status: 503 });
+                const sub = stored?.find(s => s.url === subUrl && isCollectorSource(s))
+                    || stored?.find(s => s.url === subUrl && (!id || s.id === id)) || { url: subUrl };
+                if (refreshVia === 'collector' && !isCollectorSource(sub)) return Response.json({ success: false, error: 'save-collector-source-first' });
+                const result = await refreshSourceForAdmin(sub, settings, env);
+                if (result.success && !result.serverCacheOnly) {
+                    const latest = await storage.get(KV_KEY_SUBS);
+                    const target = latest?.find(s => s.url === subUrl && (!id || s.id === id));
+                    if (target) {
+                        applyLegacyRefresh(target, result);
+                        result.name = target.name;
+                        await storage.put(KV_KEY_SUBS, latest);
+                    }
+                }
+                return Response.json(result);
+            } catch {
+                return Response.json({ success: false, error: 'refresh-failed' }, { status: 400 });
             }
-            if (!subUrl || typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
-                return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
-            }
+        }
 
-            const result = { count: 0, userInfo: null, name: '' };
-            let decodedText = null;
-
+        case '/collector_refresh': {
+            if (request.method !== 'POST') return Response.json({ error: 'method-not-allowed' }, { status: 405 });
             try {
-                const fetchOptions = {
-                    headers: { 'User-Agent': 'MiSub-Node-Counter/2.0' },
-                    redirect: "follow",
-                    cf: { insecureSkipVerify: true }
-                };
-                const trafficFetchOptions = {
-                    headers: { 'User-Agent': 'Clash for Windows/0.20.39' },
-                    redirect: "follow",
-                    cf: { insecureSkipVerify: true }
-                };
+                const { sourceId, resume } = await request.json();
+                const storage = await getStorageAdapter(env);
+                const sub = (await storage.get(KV_KEY_SUBS))?.find(sub => sub.id === sourceId && isCollectorSource(sub));
+                if (!sub) return Response.json({ success: false, error: 'source-not-found' }, { status: 404 });
+                return Response.json(await queueCollectorSource(env, sub, { resume: resume === true }));
+            } catch { return Response.json({ success: false, error: 'collector-storage-unavailable' }, { status: 503 }); }
+        }
 
-                const trafficRequest = fetch(new Request(subUrl, trafficFetchOptions));
-                const nodeCountRequest = fetch(new Request(subUrl, fetchOptions));
-
-                // --- [核心修正] 使用 Promise.allSettled 替换 Promise.all ---
-                const responses = await Promise.allSettled([trafficRequest, nodeCountRequest]);
-
-                // 1. 处理流量请求的结果
-                if (responses[0].status === 'fulfilled' && responses[0].value.ok) {
-                    const trafficResponse = responses[0].value;
-                    // 顺手取出机场声明的订阅名，供前端在「订阅名称」留空时自动填入
-                    result.name = extractSubscriptionName(trafficResponse.headers, subUrl);
-                    const userInfoHeader = trafficResponse.headers.get('subscription-userinfo');
-                    if (userInfoHeader) {
-                        const info = {};
-                        userInfoHeader.split(';').forEach(part => {
-                            const [key, value] = part.trim().split('=');
-                            if (key && value) info[key] = /^\d+$/.test(value) ? Number(value) : value;
-                        });
-                        result.userInfo = info;
-                    }
-                } else if (responses[0].status === 'rejected') {
-                    console.error(`Traffic request for ${subUrl} rejected:`, responses[0].reason);
-                }
-
-                // 2. 处理节点数请求的结果
-                if (responses[1].status === 'fulfilled' && responses[1].value.ok) {
-                    const nodeCountResponse = responses[1].value;
-                    const text = await nodeCountResponse.text();
-                    const decoded = decodeMaybeBase64ToUtf8(text);
-                    decodedText = decoded;
-                    result.cachedRaw = decodedText;
-                    // 使用统一的协议列表：之前这里漏了 socks5，导致 socks5 订阅显示 0 个节点
-                    const lineMatches = decoded.match(nodeCountRegex());
-                    if (lineMatches) {
-                        result.count = lineMatches.length;
-                    }
-                } else {
-                    // 包含兩種情況：請求被拒絕 或 響應非 2xx
-                    if (responses[1].status === 'rejected') {
-                        console.error(`Node count request for ${subUrl} rejected:`, responses[1].reason);
-                    }
-                    // 將節點數視為 0，並清空緩存文本
-                    result.count = 0;
-                    decodedText = '';
-                    result.cachedRaw = '';
-                }
-
-                // 始終更新：即使節點數為 0 或請求失敗，也更新 nodeCount 與緩存
-                const storageAdapter = await getStorageAdapter(env);
-                const originalSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
-                const allSubs = JSON.parse(JSON.stringify(originalSubs)); // 深拷贝
-                let subToUpdate = null;
-                if (subId) {
-                    subToUpdate = allSubs.find(s => s.id === subId);
-                }
-                if (!subToUpdate) {
-                    subToUpdate = allSubs.find(s => s.url === subUrl);
-                }
-
-                if (subToUpdate) {
-                    // 订阅还没有名字时，用机场声明的名称补上并落盘
-                    if ((!subToUpdate.name || !String(subToUpdate.name).trim()) && result.name) {
-                        subToUpdate.name = result.name;
-                    }
-                    result.name = subToUpdate.name || result.name || '';
-                    subToUpdate.nodeCount = result.count;
-                    // 只在这次真的取到了流量信息时才覆盖。
-                    // 之前无条件赋值：机场偶尔超时/返回 5xx 时会把已有的流量和到期
-                    // 信息清成 null，卡片上的流量条和到期提醒随之消失。
-                    if (result.userInfo) {
-                        subToUpdate.userInfo = result.userInfo;
-                    } else {
-                        result.userInfo = subToUpdate.userInfo || null; // 回传旧值，前端不必清空
-                    }
-                    subToUpdate.cachedRaw = typeof decodedText === 'string' ? decodedText : (subToUpdate.cachedRaw || '');
-                    subToUpdate.cachedAt = Date.now();
-                    subToUpdate.cachedFromUrl = subUrl;
-
-                    await storageAdapter.put(KV_KEY_SUBS, allSubs);
-
-                    // 回傳給前端用於 UI 顯示的緩存元信息
-                    result.cachedAt = subToUpdate.cachedAt;
-                    result.cachedRawPresent = !!(subToUpdate.cachedRaw && subToUpdate.cachedRaw.length > 0);
-                }
-
-            } catch (e) {
-                console.error(`[API Error /node_count] Unhandled exception for URL: ${subUrl}`, e);
-            }
-
-            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        case '/collector_status': {
+            if (request.method !== 'POST') return Response.json({ error: 'method-not-allowed' }, { status: 405 });
+            try {
+                const { sourceId, urlHash } = await request.json();
+                const storage = await getStorageAdapter(env);
+                const sub = (await storage.get(KV_KEY_SUBS))?.find(sub => sub.id === sourceId && isCollectorSource(sub));
+                if (!sub || await sourceUrlHash(sub.url) !== urlHash) return Response.json({ error: 'source-changed' }, { status: 409 });
+                const cache = createSourceCache(env, await storage.get(KV_KEY_SETTINGS) || {}, decodeMaybeBase64ToUtf8, { snapshotOnly: true });
+                if (!cache) throw new SnapshotUnavailableError();
+                const cacheStatus = await cache.status(sub);
+                cacheStatus.collector = await collectorSourceStatus(env, sub);
+                return Response.json({ cacheStatus }, { headers: { 'Cache-Control': 'no-store' } });
+            } catch { return Response.json({ error: 'collector-storage-unavailable' }, { status: 503 }); }
         }
 
         case '/fetch_external_url': { // New case
@@ -1056,6 +1072,18 @@ async function handleApiRequest(request, env) {
             }
 
             try {
+                const storage = await getStorageAdapter(env);
+                const sources = await storage.get(KV_KEY_SUBS);
+                if (!Array.isArray(sources)) return Response.json({ error: 'source-storage-unavailable' }, { status: 503 });
+                const fixed = sources.find(sub => sub.url === externalUrl && isCollectorSource(sub));
+                if (fixed) {
+                    const cache = createSourceCache(env, await storage.get(KV_KEY_SETTINGS) || {}, decodeMaybeBase64ToUtf8, { snapshotOnly: true });
+                    if (!cache) throw new SnapshotUnavailableError();
+                    try {
+                        const { text } = await cache.read(fixed, 'clash');
+                        return new Response(text, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+                    } catch { throw new SnapshotUnavailableError(); }
+                }
                 const response = await Promise.race([
                     fetch(new Request(externalUrl, {
                         headers: { 'User-Agent': 'MiSub-Proxy/1.0' }, // Identify as proxy
@@ -1073,135 +1101,49 @@ async function handleApiRequest(request, env) {
                 return new Response(content, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
 
             } catch (e) {
-                console.error(`[API Error /fetch_external_url] Failed to fetch ${externalUrl}:`, e);
-                return new Response(JSON.stringify({ error: `拉取失败：${e.message}` }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+                if (e instanceof SnapshotUnavailableError) return Response.json({ error: '固定出口快照暂不可读，请稍后重试' }, { status: 503 });
+                console.error('[API Error /fetch_external_url] Request failed');
+                return Response.json({ error: '拉取失败，请检查源地址或稍后重试' }, { status: 502 });
             }
         }
 
         // {{ AURA-X: Add - 批量节点更新API端点. Approval: 寸止(ID:1735459200). }}
         case '/batch_update_nodes': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-            if (!await authMiddleware(request, env)) {
-                return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
-            }
-
             try {
-                const { subscriptionIds } = await request.json();
-                if (!Array.isArray(subscriptionIds)) {
-                    return new Response(JSON.stringify({ error: 'subscriptionIds must be an array' }), { status: 400 });
+                const { subscriptionIds, collectorSourceIds = [] } = await request.json();
+                if (!Array.isArray(subscriptionIds)) return Response.json({ error: 'subscriptionIds must be an array' }, { status: 400 });
+                if (!Array.isArray(collectorSourceIds)) return Response.json({ error: 'collectorSourceIds must be an array' }, { status: 400 });
+                const storage = await getStorageAdapter(env);
+                const stored = await storage.get(KV_KEY_SUBS);
+                if (!Array.isArray(stored)) {
+                    return Response.json({ success: false, message: '读取订阅失败，未更新任何数据' }, { status: 503 });
                 }
-
-                const storageAdapter = await getStorageAdapter(env);
-                const storedSubs = await storageAdapter.get(KV_KEY_SUBS);
-                // 存储读取失败时适配器返回 null。之前用 `|| []` 兜底并在最后无条件
-                // 写回，等于一次读失败就把用户的全部订阅清空。这里必须直接报错退出。
-                if (!Array.isArray(storedSubs)) {
-                    console.error('[Batch Update] 读取订阅数据失败，已中止以避免覆盖现有数据');
-                    return new Response(JSON.stringify({
-                        success: false,
-                        message: '读取订阅数据失败，已中止批量更新（未改动任何数据），请稍后重试。'
-                    }), { status: 503, headers: { 'Content-Type': 'application/json' } });
-                }
-                const allSubs = storedSubs;
-                const subsToUpdate = allSubs.filter(sub => subscriptionIds.includes(sub.id) && typeof sub.url === 'string' && sub.url.startsWith('http'));
-
-                if (subsToUpdate.length === 0) {
-                    // 明确告诉前端「一个都没匹配上」，而不是回一个空的 success
-                    return new Response(JSON.stringify({
-                        success: true,
-                        message: '没有可更新的订阅（请先保存后再刷新）',
-                        matched: 0,
-                        results: []
-                    }), { headers: { 'Content-Type': 'application/json' } });
-                }
-
-                console.log(`[Batch Update] Starting batch update for ${subsToUpdate.length} subscriptions`);
-
-                // 并行更新所有订阅的节点信息
-                const updatePromises = subsToUpdate.map(async (sub) => {
+                const config = { ...defaultSettings, ...await storage.get(KV_KEY_SETTINGS) };
+                const targets = stored.filter(sub => subscriptionIds.includes(sub.id) && /^https?:\/\//.test(sub.url));
+                const results = await Promise.all(targets.map(async sub => {
                     try {
-                        const fetchOptions = {
-                            headers: { 'User-Agent': 'MiSub-Batch-Updater/1.0' },
-                            redirect: "follow",
-                            cf: { insecureSkipVerify: true }
-                        };
-
-                        const response = await Promise.race([
-                            fetch(sub.url, fetchOptions),
-                            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
-                        ]);
-
-                        if (response.ok) {
-                            // 更新流量信息
-                            const userInfoHeader = response.headers.get('subscription-userinfo');
-                            if (userInfoHeader) {
-                                const info = {};
-                                userInfoHeader.split(';').forEach(part => {
-                                    const [key, value] = part.trim().split('=');
-                                    if (key && value) info[key] = /^\d+$/.test(value) ? Number(value) : value;
-                                });
-                                sub.userInfo = info;
-                            }
-
-                            // 更新节点数量
-                            const text = await response.text();
-                            const decoded = decodeMaybeBase64ToUtf8(text);
-                            const matches = decoded.match(nodeCountRegex());
-                            sub.nodeCount = matches ? matches.length : 0;
-                            // 保存原始解码后的订阅文本以供后续聚合使用
-                            if (decoded && decoded.length > 0) {
-                                sub.cachedRaw = decoded;
-                                sub.cachedAt = Date.now();
-                                sub.cachedFromUrl = sub.url;
-                            }
-
-                            // 把缓存元信息一并回传：前端保存时会整表覆盖，
-                            // 如果它不知道后端刚写入的缓存，下一次保存就会把 cachedRaw 抹掉。
-                            return {
-                                id: sub.id,
-                                success: true,
-                                nodeCount: sub.nodeCount,
-                                userInfo: sub.userInfo || null,
-                                cachedRaw: sub.cachedRaw || '',
-                                cachedAt: sub.cachedAt || null,
-                                cachedFromUrl: sub.cachedFromUrl || null,
-                                cachedRawPresent: !!(sub.cachedRaw && sub.cachedRaw.length > 0)
-                            };
-                        } else {
-                            return { id: sub.id, success: false, error: `HTTP ${response.status}` };
-                        }
-                    } catch (error) {
-                        return { id: sub.id, success: false, error: error.message };
+                        if (collectorSourceIds.includes(sub.id) && !isCollectorSource(sub)) return { id: sub.id, success: false, error: 'save-collector-source-first' };
+                        const result = await refreshSourceForAdmin(sub, config, env);
+                        return { ...result, id: sub.id, nodeCount: result.count, sourceUrl: sub.url };
+                    } catch { return { id: sub.id, success: false, error: 'refresh-failed' }; }
+                }));
+                const legacyUpdates = results.filter(r => r.success && !r.serverCacheOnly);
+                if (legacyUpdates.length) {
+                    const latest = await storage.get(KV_KEY_SUBS);
+                    if (!Array.isArray(latest)) throw new Error('storage-read-failed');
+                    for (const result of legacyUpdates) {
+                        const target = latest.find(s => s.id === result.id && s.url === result.sourceUrl);
+                        if (target) applyLegacyRefresh(target, result);
                     }
-                });
-
-                const results = await Promise.allSettled(updatePromises);
-                const updateResults = results.map(result =>
-                    result.status === 'fulfilled' ? result.value : { success: false, error: 'Promise rejected' }
-                );
-
-                // 使用存储适配器保存更新后的数据
-                await storageAdapter.put(KV_KEY_SUBS, allSubs);
-
-                const successCount = updateResults.filter(r => r.success).length;
-                console.log(`[Batch Update] Completed batch update, ${successCount} successful`);
-
-                const failed = updateResults.filter(r => !r.success);
-                return new Response(JSON.stringify({
-                    success: true,
-                    message: failed.length === 0
-                        ? `批量更新完成，成功 ${successCount} 个`
-                        : `批量更新完成：成功 ${successCount} 个，失败 ${failed.length} 个`,
-                    matched: subsToUpdate.length,
-                    results: updateResults
-                }), { headers: { 'Content-Type': 'application/json' } });
-
-            } catch (error) {
-                console.error('[API Error /batch_update_nodes]', error);
-                return new Response(JSON.stringify({
-                    success: false,
-                    message: `批量更新失败: ${error.message}`
-                }), { status: 500 });
+                    await storage.put(KV_KEY_SUBS, latest);
+                }
+                const successful = results.filter(r => r.success).length;
+                return Response.json({ success: true, matched: targets.length,
+                    message: targets.length ? `刷新完成：成功 ${successful} 个，失败 ${targets.length - successful} 个` : '没有可更新的订阅（请先保存）',
+                    results: results.map(({ sourceUrl, ...result }) => result) });
+            } catch {
+                return Response.json({ success: false, message: '批量更新失败，已保留原缓存' }, { status: 500 });
             }
         }
 
@@ -1231,6 +1173,14 @@ async function handleApiRequest(request, env) {
                     // 归一化存储类型，避免把非法值写进去导致后续一直回退到 KV
                     const requestedType = finalSettings.storageType === STORAGE_TYPES.D1 ? STORAGE_TYPES.D1 : STORAGE_TYPES.KV;
                     finalSettings.storageType = requestedType;
+                    if (finalSettings.sourceCacheEnabled === true) {
+                        const db = getBinding(env, 'MISUB_DB');
+                        if (requestedType !== STORAGE_TYPES.D1 || !db) {
+                            return Response.json({ success: false, message: '缓存优先功能需要 D1 存储' }, { status: 400 });
+                        }
+                        try { await db.prepare('SELECT source_id, format, source_url_hash, payload, node_count, user_info, last_success_at, last_attempt_at, error_code, lock_until, lock_token FROM subscription_cache LIMIT 0').all(); }
+                        catch { return Response.json({ success: false, message: '请先审核并手动执行缓存表迁移，再开启此功能' }, { status: 400 }); }
+                    }
 
                     // --- 切换存储类型 ---
                     // 关键点：之前的实现把新设置写回「旧」存储。切到 D1 时，
@@ -1369,12 +1319,29 @@ async function generateCombinedNodeList(context, config, misubs, prependedConten
         const sub = item;
         return (async () => {
             try {
-                const { text, usedSource, failure } = await fetchSubscriptionText(sub, {
+                const fetchOptions = {
                     decode: decodeMaybeBase64ToUtf8,
                     preferClash: acceptClashProxies,
                     isUsable: value => (acceptClashProxies && parseClashProxyList(value))
                         || value.split(/\r?\n/).some(line => nodeRegex.test(line.trim())),
-                });
+                };
+                const fixed = isCollectorSource(sub);
+                const cache = usesSourceCache(sub, config) ? createSourceCache(context.env, config, decodeMaybeBase64ToUtf8, { snapshotOnly: fixed }) : null;
+                if (fixed && !cache) throw new SnapshotUnavailableError();
+                let fetched;
+                if (cache) {
+                    try {
+                        fetched = await cache.read(sub, acceptClashProxies ? 'clash' : 'universal', context);
+                        // A source may only support share links. Keep the native snapshot
+                        // independent, but allow the existing URI converter as output fallback.
+                        if (acceptClashProxies && !fetched.text) fetched = await cache.read(sub, 'universal', context);
+                    }
+                    catch { if (fixed) throw new SnapshotUnavailableError(); /* Other sources retain legacy fallback. */ }
+                }
+                const loaded = fetched || await fetchSubscriptionText(sub, fetchOptions);
+                // Request-local only: quota display must follow refreshed snapshot metadata.
+                if (fetched?.userInfo) sub.userInfo = fetched.userInfo;
+                const { text, usedSource, failure } = loaded;
                 let validNodes = (acceptClashProxies && parseClashProxyList(text)) || text.replace(/\r\n/g, '\n').split('\n')
                     .map(line => line.trim()).filter(line => nodeRegex.test(line));
                 const inputCount = validNodes.length;
@@ -1446,7 +1413,10 @@ async function generateCombinedNodeList(context, config, misubs, prependedConten
                     });
                 }
                 return output;
-            } catch { return []; }
+            } catch (error) {
+                if (error instanceof SnapshotUnavailableError) throw error;
+                return [];
+            }
         })();
     });
     const pieces = await Promise.all(itemTasks);
@@ -1491,6 +1461,9 @@ async function handleMisubRequest(context) {
     const allProfiles = profilesData || [];
     // 關鍵：我們在這裡定義了 `config`，後續都應該使用它
     const config = { ...defaultSettings, ...settings };
+    if (!Array.isArray(misubsData) || !Array.isArray(profilesData)) {
+        return subscriptionErrorResponse(request, 503, '订阅数据暂不可读', '请保留客户端现有配置，稍后重试订阅更新。');
+    }
 
     let token = '';
     let profileIdentifier = null;
@@ -1638,6 +1611,15 @@ async function handleMisubRequest(context) {
         context.waitUntil(sendTgNotification(config, message));
     }
 
+    const debugMode = url.searchParams.has('__debug');
+    const debugCollector = debugMode ? [] : null;
+    const directClash = targetFormat === 'clash' && config.useDirectClashMeta;
+    let combinedNodes;
+    try { combinedNodes = await generateCombinedNodeList(context, config, targetMisubs, '', debugCollector, directClash); }
+    catch (error) {
+        if (error instanceof SnapshotUnavailableError) return subscriptionErrorResponse(request, 503, '固定出口快照暂不可用', '请保留客户端现有配置，等待采集器取得有效快照后再更新订阅。');
+        throw error;
+    }
     let prependedContentForSubconverter = '';
 
     if (isProfileExpired) { // Use the flag set earlier
@@ -1665,10 +1647,10 @@ async function handleMisubRequest(context) {
         }
     }
 
-    const debugMode = url.searchParams.has('__debug');
-    const debugCollector = debugMode ? [] : null;
-    const directClash = targetFormat === 'clash' && config.useDirectClashMeta;
-    const combinedNodes = await generateCombinedNodeList(context, config, targetMisubs, prependedContentForSubconverter, debugCollector, directClash);
+    if (prependedContentForSubconverter) {
+        combinedNodes = Array.isArray(combinedNodes) ? [prependedContentForSubconverter, ...combinedNodes]
+            : prependedContentForSubconverter + '\n' + combinedNodes;
+    }
     const combinedNodeList = Array.isArray(combinedNodes)
         ? combinedNodes.map(node => typeof node === 'string' ? node : JSON.stringify(node)).join('\n')
         : combinedNodes;
