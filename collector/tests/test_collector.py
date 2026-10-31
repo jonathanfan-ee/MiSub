@@ -159,6 +159,8 @@ class CollectorTests(unittest.TestCase):
                         pass
                     return
                 self.send_response(200)
+                if self.path == "/truncated":
+                    self.send_header("Content-Length", "100")
                 self.end_headers()
                 try:
                     if self.path == "/slow":
@@ -183,6 +185,8 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual(collector.Transport().request("https://fixture.example/ok")[2], b"fixture-body")
                 with self.assertRaisesRegex(collector.CollectorError, "response-too-large"):
                     collector.Transport().request("https://fixture.example/ok", limit=8)
+                with self.assertRaisesRegex(collector.CollectorError, "invalid-response"):
+                    collector.Transport().request("https://fixture.example/truncated")
                 with self.assertRaisesRegex(collector.CollectorError, "timeout"):
                     collector.Transport().request("https://fixture.example/slow", timeout=0.06)
                 started = time.monotonic()

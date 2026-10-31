@@ -123,6 +123,16 @@ class Transport:
             connection.request(method, path, body=body, headers=headers or {})
             channel.settimeout(remaining(deadline))
             response = connection.getresponse()
+            declared_length = None
+            if response.getheader("Content-Length") is not None and not response.getheader("Transfer-Encoding"):
+                try:
+                    declared_length = int(response.getheader("Content-Length"))
+                except ValueError:
+                    raise CollectorError("invalid-response") from None
+                if declared_length < 0:
+                    raise CollectorError("invalid-response")
+                if declared_length > limit:
+                    raise CollectorError("response-too-large")
             data = bytearray()
             while True:
                 channel.settimeout(remaining(deadline))
@@ -133,6 +143,8 @@ class Transport:
                 if len(data) > limit:
                     raise CollectorError("response-too-large")
             remaining(deadline)
+            if declared_length is not None and len(data) != declared_length:
+                raise CollectorError("invalid-response")
             return response.status, {key.lower(): value for key, value in response.getheaders()}, bytes(data)
         except CollectorError:
             raise
