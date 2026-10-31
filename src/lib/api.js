@@ -104,12 +104,13 @@ export async function fetchNodeCount(subUrl, id) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: subUrl, id })
         });
-        if (checkUnauthorized(res)) return { count: 0, userInfo: null };
+        if (checkUnauthorized(res)) return { success: false, error: '登录已过期' };
+        if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
         const data = await res.json();
         return data; // [修正] 直接返回整个对象 { count, userInfo }
     } catch (e) {
         console.error('fetchNodeCount error:', e);
-        return { count: 0, userInfo: null };
+        return { success: false, error: '网络请求失败' };
     }
 }
 

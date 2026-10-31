@@ -20,6 +20,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       exclude: sub.exclude || '', // 新增 exclude 属性
       // 新增：聚合实时拉取控制与缓存字段
       realtimeFetch: sub.realtimeFetch !== false, // 默认开启实时拉取
+      fetchPolicy: sub.fetchPolicy || 'legacy',
       cachedRaw: sub.cachedRaw || '',
       cachedAt: sub.cachedAt || null,
       cachedFromUrl: sub.cachedFromUrl || null,
@@ -69,7 +70,14 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     }
 
     try {
-      const data = await fetchNodeCount(subToUpdate.url, subToUpdate.id);
+      const requestedUrl = subToUpdate.url;
+      const data = await fetchNodeCount(requestedUrl, subToUpdate.id);
+      if (subscriptions.value.find(s => s.id === subId)?.url !== requestedUrl) return;
+      if (data.cacheStatus) subToUpdate.cacheStatus = data.cacheStatus;
+      if (data.success === false) {
+        if (!isInitialLoad) showToast(`${subToUpdate.name || '订阅'} 刷新失败，已保留原缓存：${data.error || '请稍后重试'}`, 'error');
+        return;
+      }
       // 兑现「订阅名称不填将自动获取」：优先用机场声明的名称，
       // 后端取不到时会退回主机名，总之不再留下「未命名订阅」。
       if ((!subToUpdate.name || !subToUpdate.name.trim()) && data.name) {
@@ -80,6 +88,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       if (typeof data.cachedAt !== 'undefined') {
         subToUpdate.cachedAt = data.cachedAt;
       }
+      if (typeof data.cachedFromUrl === 'string') subToUpdate.cachedFromUrl = data.cachedFromUrl;
       // 後端若帶回 cachedRawPresent 與 cachedRaw，保持一致
       if (typeof data.cachedRawPresent !== 'undefined') {
         subToUpdate.cachedRawPresent = !!data.cachedRawPresent;
@@ -93,8 +102,8 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       }
 
       if (!isInitialLoad) {
-        showToast(`${subToUpdate.name || '订阅'} 更新成功！`, 'success');
-        markDirty();
+        showToast(data.error ? `${subToUpdate.name || '订阅'} 部分格式刷新失败：${data.error}` : `${subToUpdate.name || '订阅'} 更新成功！`, data.error ? 'info' : 'success');
+        if (!data.serverCacheOnly) markDirty();
       }
     } catch (error) {
       if (!isInitialLoad) showToast(`${subToUpdate.name || '订阅'} 更新失败`, 'error');
@@ -123,6 +132,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
         updatedSub.cachedFromUrl = null;
         updatedSub.cachedRawPresent = false;
         updatedSub.userInfo = null;
+        updatedSub.cacheStatus = null;
       }
       // 必须先把新对象写进数组，再触发刷新。
       // 之前的顺序相反：handleUpdateNodeCount 会通过 id 从数组里取到「旧」对象，
@@ -157,9 +167,11 @@ export function useSubscriptions(initialSubsRef, markDirty) {
    */
   function applyBatchResults(results) {
     (results || []).forEach(r => {
-      if (!r || !r.success) return;
+      if (!r) return;
       const sub = subscriptions.value.find(s => s.id === r.id);
       if (!sub) return;
+      if (r.cacheStatus) sub.cacheStatus = r.cacheStatus;
+      if (!r.success) return;
       sub.nodeCount = r.nodeCount ?? sub.nodeCount;
       if (r.userInfo) sub.userInfo = r.userInfo;
       if (typeof r.cachedRaw === 'string') sub.cachedRaw = r.cachedRaw;
