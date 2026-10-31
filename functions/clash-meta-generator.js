@@ -136,8 +136,20 @@ export async function convertLinksToClashProxies(nodeLinks, options = {}) {
                     hosts[proxy.server] = addresses;
                 }
                 if (proxy.server !== originalServer) {
-                    if (['trojan', 'hysteria', 'hysteria2', 'tuic', 'anytls'].includes(proxy.type) && !proxy.sni) proxy.sni = originalServer;
-                    if (['vmess', 'vless'].includes(proxy.type) && proxy.tls && !proxy.servername) proxy.servername = originalServer;
+                    const findHost = headers => Object.entries(headers || {}).find(([key]) => key.toLowerCase() === 'host')?.[1];
+                    const websocketHost = findHost(proxy['ws-opts']?.headers);
+                    if (!['vmess', 'vless'].includes(proxy.type)
+                        && (proxy.tls || ['trojan', 'hysteria', 'hysteria2', 'tuic', 'anytls'].includes(proxy.type))
+                        && !proxy.sni) proxy.sni = originalServer;
+                    if (['vmess', 'vless'].includes(proxy.type) && proxy.tls && !proxy.servername) {
+                        proxy.servername = proxy.network === 'ws' && websocketHost ? websocketHost : originalServer;
+                    }
+                    if (proxy.network === 'ws' && !websocketHost) {
+                        proxy['ws-opts'] = { ...proxy['ws-opts'], headers: { ...proxy['ws-opts']?.headers, Host: originalServer } };
+                    }
+                    if (proxy.network === 'http' && !findHost(proxy['http-opts']?.headers)) {
+                        proxy['http-opts'] = { ...proxy['http-opts'], headers: { ...proxy['http-opts']?.headers, Host: [originalServer] } };
+                    }
                 }
             }
             if (!proxy || !proxy.server || !proxy.port) {

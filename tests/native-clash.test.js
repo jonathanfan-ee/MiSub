@@ -64,3 +64,45 @@ test('administrator template hosts take precedence over airport host mappings', 
     assert.equal(config.proxies[0].server, 'entry.example');
     assert.equal(config.hosts['entry.example'], '192.0.2.20');
 });
+
+test('preserves HTTPS proxy verification identity and explicit SNI', async () => {
+    for (const sni of [undefined, 'explicit-tls.example']) {
+        const nodes = parseClashProxyList(yaml.dump({
+            proxies: [{ name: 'HTTPS', type: 'http', server: 'entry.example', port: 443, tls: true, ...(sni ? { sni } : {}) }],
+            hosts: { 'entry.example': '192.0.2.10' },
+        }));
+        const config = yaml.load(await generateClashMetaYAML(nodes));
+        assert.notEqual(config.proxies[0].server, 'entry.example');
+        assert.equal(config.proxies[0].sni, sni || 'entry.example');
+        assert.ok(!config.proxies[0]['skip-cert-verify']);
+    }
+});
+
+test('preserves implicit and explicit WebSocket Host, path and TLS identity', async () => {
+    for (const headers of [{}, { hOsT: 'explicit-ws.example' }]) {
+        const nodes = parseClashProxyList(yaml.dump({
+            proxies: [{ name: 'WS', type: 'vmess', server: 'entry.example', port: 443, tls: true,
+                network: 'ws', uuid: '00000000-0000-0000-0000-000000000001',
+                'ws-opts': { path: '/websocket', headers } }],
+            hosts: { 'entry.example': '192.0.2.10' },
+        }));
+        const config = yaml.load(await generateClashMetaYAML(nodes));
+        const proxy = config.proxies[0];
+        assert.equal(proxy['ws-opts'].path, '/websocket');
+        assert.deepEqual(proxy['ws-opts'].headers, Object.keys(headers).length ? headers : { Host: 'entry.example' });
+        assert.equal(proxy.servername, headers.hOsT || 'entry.example');
+    }
+});
+
+test('preserves implicit HTTP transport Host without changing an explicit header', async () => {
+    for (const headers of [{}, { Host: ['explicit-http.example'] }]) {
+        const nodes = parseClashProxyList(yaml.dump({
+            proxies: [{ name: 'HTTP transport', type: 'vmess', server: 'entry.example', port: 443, tls: true,
+                network: 'http', uuid: '00000000-0000-0000-0000-000000000001', 'http-opts': { path: ['/transport'], headers } }],
+            hosts: { 'entry.example': '192.0.2.10' },
+        }));
+        const config = yaml.load(await generateClashMetaYAML(nodes));
+        assert.deepEqual(config.proxies[0]['http-opts'].headers, Object.keys(headers).length ? headers : { Host: ['entry.example'] });
+        assert.equal(config.proxies[0].servername, 'entry.example');
+    }
+});
