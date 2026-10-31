@@ -2,7 +2,7 @@ import { getBinding } from './storage-adapter.js';
 import { fetchSubscriptionText, parseClashProxyList } from './subscription-fetch.js';
 
 export const CACHE_TIMING = Object.freeze({
-    fresh: 30 * 60_000,
+    fresh: 5 * 60_000,
     timeout: 10_000,
     retry: 5 * 60_000,
     lock: 30_000,
