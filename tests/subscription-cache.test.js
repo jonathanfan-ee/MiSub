@@ -188,6 +188,20 @@ test('aggregation uses cached native fields and hosts without rewriting the subs
     } finally { globalThis.fetch = originalFetch; }
 });
 
+test('a request holding an obsolete source configuration cannot acquire a new lease or publish after a URL edit', async () => {
+    const env = await setupRoute({ url: 'https://before-edit.example/sub' });
+    const cache = createSourceCache(env, { sourceCacheEnabled: true, storageType: 'd1' }, decode);
+    const oldSub = { ...source('route'), url: 'https://before-edit.example/sub' };
+    const oldHash = await sourceUrlHash(oldSub.url);
+    const token = await cache.store.lock('route', oldHash, 10_000, false, oldSub.url);
+    assert.ok(token);
+    await setupRoute({ url: 'https://after-edit.example/sub' });
+    const snapshots = { clash: { text: native, count: 1 }, universal: { text: link, count: 1 } };
+    await cache.store.publish('route', oldHash, token, snapshots, 10_001, oldSub.url);
+    assert.ok(!(await cache.store.rows('route', oldHash)).some(row => row.payload));
+    assert.equal(await cache.store.lock('route', oldHash, 20_000, true, oldSub.url), null);
+});
+
 test('disabled, expired and invalid profile tokens never read the source cache or fetch the source', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = () => assert.fail('unauthorized/expired profile must not fetch');

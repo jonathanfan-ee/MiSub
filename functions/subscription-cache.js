@@ -9,6 +9,10 @@ export const CACHE_TIMING = Object.freeze({
     warning: 24 * 60 * 60_000,
 });
 const FORMATS = ['clash', 'universal'];
+const CURRENT_SOURCE = `EXISTS (SELECT 1 FROM subscriptions, json_each(subscriptions.data) AS source
+    WHERE subscriptions.id = 'main' AND json_extract(source.value, '$.id') = ?1
+        AND json_extract(source.value, '$.url') = ?11
+        AND json_extract(source.value, '$.fetchPolicy') = 'cache-first')`;
 const LINK = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy2?|tuic|anytls|socks5):\/\//i;
 export const countUniversalNodes = text => text.split(/\r?\n/).filter(line => LINK.test(line.trim())).length;
 
@@ -20,7 +24,10 @@ export async function sourceUrlHash(url) {
 // The third (lease) row coordinates both formats. Only payload rows hold snapshots.
 // Fencing by token AND URL hash prevents late jobs from replacing a newer refresh.
 export class D1SourceCacheStore {
-    constructor(db) { this.db = db; }
+    constructor(db, { enforceSourceUrl = false } = {}) {
+        this.db = db;
+        this.enforceSourceUrl = enforceSourceUrl;
+    }
 
     async rows(id, hash) {
         const result = await this.db.prepare('SELECT * FROM subscription_cache WHERE source_id = ?1 AND source_url_hash = ?2')
@@ -28,11 +35,11 @@ export class D1SourceCacheStore {
         return result.results;
     }
 
-    async lock(id, hash, now, force) {
+    async lock(id, hash, now, force, sourceUrl = '') {
         const token = crypto.randomUUID();
         const row = await this.db.prepare(`
             INSERT INTO subscription_cache (source_id, format, source_url_hash, last_attempt_at, lock_until, lock_token)
-            VALUES (?1, 'lease', ?2, ?3, ?4, ?5)
+            SELECT ?1, 'lease', ?2, ?3, ?4, ?5 WHERE (?10 = 0 OR ${CURRENT_SOURCE})
             ON CONFLICT(source_id, format) DO UPDATE SET
                 source_url_hash = excluded.source_url_hash, last_attempt_at = excluded.last_attempt_at,
                 lock_until = excluded.lock_until, lock_token = excluded.lock_token
@@ -40,11 +47,12 @@ export class D1SourceCacheStore {
                 (subscription_cache.lock_until <= ?3 AND
                  (?6 = 1 OR subscription_cache.last_attempt_at <= ?7))
             RETURNING lock_token
-        `).bind(id, hash, now, now + CACHE_TIMING.lock, token, force ? 1 : 0, now - CACHE_TIMING.retry).first();
+        `).bind(id, hash, now, now + CACHE_TIMING.lock, token, force ? 1 : 0, now - CACHE_TIMING.retry,
+            null, null, this.enforceSourceUrl ? 1 : 0, sourceUrl).first();
         return row?.lock_token || null;
     }
 
-    async publish(id, hash, token, snapshots, now) {
+    async publish(id, hash, token, snapshots, now, sourceUrl = '') {
         const statements = FORMATS.map(format => {
             const snapshot = snapshots[format];
             return this.db.prepare(`
@@ -53,6 +61,7 @@ export class D1SourceCacheStore {
                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
                 WHERE EXISTS (SELECT 1 FROM subscription_cache WHERE source_id = ?1 AND format = 'lease'
                     AND source_url_hash = ?3 AND lock_token = ?10 AND lock_until > ?8)
+                    AND (?12 = 0 OR ${CURRENT_SOURCE})
                 ON CONFLICT(source_id, format) DO UPDATE SET
                     source_url_hash = excluded.source_url_hash,
                     payload = CASE WHEN ?7 IS NOT NULL THEN excluded.payload WHEN subscription_cache.source_url_hash = ?3 THEN subscription_cache.payload ELSE '' END,
@@ -62,7 +71,7 @@ export class D1SourceCacheStore {
                     last_attempt_at = excluded.last_attempt_at, error_code = excluded.error_code
             `).bind(id, format, hash, snapshot.text || '', snapshot.count || 0,
                 snapshot.userInfo ? JSON.stringify(snapshot.userInfo) : null,
-                snapshot.failure ? null : now, now, snapshot.failure || null, token);
+                snapshot.failure ? null : now, now, snapshot.failure || null, token, sourceUrl, this.enforceSourceUrl ? 1 : 0);
         });
         statements.push(this.db.prepare(`UPDATE subscription_cache SET lock_until = 0, lock_token = NULL, last_attempt_at = ?4
             WHERE source_id = ?1 AND format = 'lease' AND source_url_hash = ?2 AND lock_token = ?3`)
@@ -82,7 +91,7 @@ export class SourceCache {
 
     async refresh(sub, { force = false } = {}) {
         const hash = await sourceUrlHash(sub.url);
-        const token = await this.store.lock(sub.id, hash, this.now(), force);
+        const token = await this.store.lock(sub.id, hash, this.now(), force, sub.url);
         if (!token) return false;
         const snapshots = Object.fromEntries(await Promise.all(FORMATS.map(async format => {
             const result = await fetchSubscriptionText({ url: sub.url }, {
@@ -95,7 +104,7 @@ export class SourceCache {
                 ? parseClashProxyList(result.text).length : countUniversalNodes(result.text);
             return [format, { ...result, count }];
         })));
-        await this.store.publish(sub.id, hash, token, snapshots, this.now());
+        await this.store.publish(sub.id, hash, token, snapshots, this.now(), sub.url);
         return true;
     }
 
@@ -147,7 +156,7 @@ export class SourceCache {
 export function createSourceCache(env, config, decode) {
     if (config.sourceCacheEnabled !== true || config.storageType !== 'd1') return null;
     const db = getBinding(env, 'MISUB_DB');
-    return db ? new SourceCache(new D1SourceCacheStore(db), { decode }) : null;
+    return db ? new SourceCache(new D1SourceCacheStore(db, { enforceSourceUrl: true }), { decode }) : null;
 }
 
 export const usesSourceCache = (sub, config) => config.sourceCacheEnabled === true && sub.fetchPolicy === 'cache-first';
