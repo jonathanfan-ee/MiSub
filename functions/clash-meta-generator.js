@@ -4,6 +4,7 @@
  */
 
 import yaml from 'js-yaml';
+import { CLASH_PROXY_HOSTS } from './subscription-fetch.js';
 
 // mihomo 的保留名称：节点名不能和它们冲突，否则代理组引用会指向错误的目标
 const RESERVED_PROXY_NAMES = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'GLOBAL', 'COMPATIBLE']);
@@ -70,6 +71,7 @@ function parseAlpn(value) {
 export async function convertLinksToClashProxies(nodeLinks, options = {}) {
     const proxies = [];
     const skipped = [];
+    const hosts = {};
     // 只用一个「已占用名称」集合。
     // 之前用 name -> count 的写法会自己造出重名：例如输入 A、A、A [2] 时，
     // 第二个 A 被改成 "A [2]"，和后面真实存在的 "A [2]" 撞车，而 mihomo 会
@@ -92,18 +94,40 @@ export async function convertLinksToClashProxies(nodeLinks, options = {}) {
     ];
 
     for (const link of nodeLinks) {
-        const trimmed = String(link || '').trim();
-        if (!trimmed) continue;
+        const nativeProxy = link && typeof link === 'object' ? link : null;
+        const trimmed = nativeProxy ? '' : String(link || '').trim();
+        if (!nativeProxy && !trimmed) continue;
         const lower = trimmed.toLowerCase();
 
         const entry = parsers.find(([prefix]) => lower.startsWith(prefix));
-        if (!entry) {
+        if (!nativeProxy && !entry) {
             skipped.push({ link: trimmed.substring(0, 60), reason: '不支持的协议' });
             continue;
         }
 
         try {
-            const proxy = entry[1](trimmed);
+            // Preserve transport/plugin fields supplied by native Clash YAML,
+            // notably ShadowTLS, which a universal SS link may not contain.
+            const proxy = nativeProxy ? JSON.parse(JSON.stringify(nativeProxy)) : entry[1](trimmed);
+            if (nativeProxy?.[CLASH_PROXY_HOSTS]) {
+                const effectiveHosts = { ...nativeProxy[CLASH_PROXY_HOSTS], ...options.hosts };
+                const originalServer = proxy.server;
+                const visited = new Set();
+                // A dedicated proxy-server-nameserver can bypass DNS hosts CNAME
+                // handling. Materialize domain aliases into the dial endpoint;
+                // leave address lists to mihomo so address selection is retained.
+                while (!visited.has(proxy.server)) {
+                    visited.add(proxy.server);
+                    const alias = effectiveHosts[proxy.server];
+                    if (typeof alias !== 'string' || /:|^\d+(?:\.\d+){3}$/.test(alias)) break;
+                    if (visited.has(alias)) break;
+                    proxy.server = alias;
+                }
+                if (proxy.server !== originalServer) {
+                    if (['trojan', 'hysteria', 'hysteria2', 'tuic', 'anytls'].includes(proxy.type) && !proxy.sni) proxy.sni = originalServer;
+                    if (['vmess', 'vless'].includes(proxy.type) && proxy.tls && !proxy.servername) proxy.servername = originalServer;
+                }
+            }
             if (!proxy || !proxy.server || !proxy.port) {
                 skipped.push({ link: trimmed.substring(0, 60), reason: '缺少 server/port' });
                 continue;
@@ -122,13 +146,14 @@ export async function convertLinksToClashProxies(nodeLinks, options = {}) {
             proxy.name = candidate;
 
             proxies.push(proxy);
+            if (nativeProxy?.[CLASH_PROXY_HOSTS]) Object.assign(hosts, nativeProxy[CLASH_PROXY_HOSTS]);
         } catch (error) {
             skipped.push({ link: trimmed.substring(0, 60), reason: error.message });
             console.error(`Failed to parse proxy link: ${trimmed.substring(0, 50)}...`, error);
         }
     }
 
-    return { proxies, skipped };
+    return { proxies, skipped, hosts };
 }
 
 /**
@@ -177,7 +202,7 @@ export async function generateClashMetaYAML(nodeLinks, templateConfig, settings 
         );
 
         // 1. 转换节点
-        const { proxies, skipped } = await convertLinksToClashProxies(nodeLinks, { groupNames });
+        const { proxies, skipped, hosts } = await convertLinksToClashProxies(nodeLinks, { groupNames, hosts: config.hosts });
 
         if (skipped.length > 0) {
             // 不静默丢弃：把跳过的节点写进日志，方便在 Cloudflare 日志里定位
@@ -194,6 +219,7 @@ export async function generateClashMetaYAML(nodeLinks, templateConfig, settings 
 
         // 4. 设置代理列表
         config.proxies = proxies;
+        if (Object.keys(hosts).length) config.hosts = { ...hosts, ...config.hosts };
 
         // 5. 处理代理组 - 支持 filter 字段的智能筛选
         if (Array.isArray(config['proxy-groups'])) {

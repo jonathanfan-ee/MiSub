@@ -1,6 +1,7 @@
 import yaml from 'js-yaml';
 import { StorageFactory, DataMigrator, STORAGE_TYPES, getBinding } from './storage-adapter.js';
 import { generateClashMetaYAML } from './clash-meta-generator.js';
+import { fetchSubscriptionText, parseClashProxyList } from './subscription-fetch.js';
 
 const OLD_KV_KEY = 'misub_data_v1';
 const KV_KEY_SUBS = 'misub_subscriptions_v1';
@@ -91,6 +92,7 @@ function b64ToUtf8(input) {
  */
 function getNodeDisplayName(link) {
     if (!link) return '';
+    if (typeof link === 'object') return String(link.name || '');
     const lower = link.toLowerCase();
 
     if (lower.startsWith('vmess://')) {
@@ -1313,6 +1315,10 @@ async function handleApiRequest(request, env) {
 // --- 名称前缀辅助函数 (无修改) ---
 function prependNodeName(link, prefix) {
     if (!prefix) return link;
+    if (typeof link === 'object') {
+        const name = String(link.name || `${link.server}:${link.port}`);
+        return { ...link, name: name.startsWith(prefix) ? name : `${prefix} - ${name}` };
+    }
     const appendToFragment = (baseLink, namePrefix) => {
         const hashIndex = baseLink.lastIndexOf('#');
         const originalName = hashIndex !== -1 ? decodeURIComponent(baseLink.substring(hashIndex + 1)) : '';
@@ -1349,7 +1355,7 @@ function prependNodeName(link, prefix) {
 }
 
 // --- 节点列表生成函数（保留前端保存的顺序） ---
-async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '', debugCollector = null) {
+async function generateCombinedNodeList(context, config, misubs, prependedContent = '', debugCollector = null, acceptClashProxies = false) {
     const nodeRegex = NODE_LINE_REGEX;
 
     // 逐项按保存顺序生成，HTTP 订阅并行请求但保持顺序
@@ -1357,43 +1363,22 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
         if (!item.url.toLowerCase().startsWith('http')) {
             // 手动节点
             const shouldPrefixManual = (typeof config.prependSubNameManual === 'boolean') ? config.prependSubNameManual : config.prependSubName;
-            return Promise.resolve(item.isExpiredNode ? item.url : (shouldPrefixManual ? prependNodeName(item.url, '手动节点') : item.url));
+            return Promise.resolve([item.isExpiredNode ? item.url : (shouldPrefixManual ? prependNodeName(item.url, '手动节点') : item.url)]);
         }
         // 订阅
         const sub = item;
         return (async () => {
             try {
-                let text = '';
-                let usedSource = 'cache';
-                if (sub.realtimeFetch === false) {
-                    text = sub.cachedRaw || '';
-                    if (!text) return '';
-                } else {
-                    const requestHeaders = { 'User-Agent': userAgent };
-                    const response = await Promise.race([
-                        fetch(new Request(sub.url, { headers: requestHeaders, redirect: 'follow', cf: { insecureSkipVerify: true } })),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), 10000))
-                    ]);
-                    if (!response.ok) {
-                        text = sub.cachedRaw || '';
-                        usedSource = 'cache';
-                        if (!text) return '';
-                    } else {
-                        text = await response.text();
-                        usedSource = 'live';
-                    }
-                    try {
-                        const cleanedText = text.replace(/\s/g, '');
-                        if (cleanedText.length > 20 && /^[A-Za-z0-9+\/=]+$/.test(cleanedText)) {
-                            const binaryString = atob(cleanedText);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
-                            text = new TextDecoder('utf-8').decode(bytes);
-                        }
-                    } catch (e) { }
-                }
-                let validNodes = text.replace(/\r\n/g, '\n').split('\n')
+                const { text, usedSource, failure } = await fetchSubscriptionText(sub, {
+                    decode: decodeMaybeBase64ToUtf8,
+                    preferClash: acceptClashProxies,
+                    isUsable: value => (acceptClashProxies && parseClashProxyList(value))
+                        || value.split(/\r?\n/).some(line => nodeRegex.test(line.trim())),
+                });
+                let validNodes = (acceptClashProxies && parseClashProxyList(text)) || text.replace(/\r\n/g, '\n').split('\n')
                     .map(line => line.trim()).filter(line => nodeRegex.test(line));
+                const inputCount = validNodes.length;
+                const protocolOf = node => typeof node === 'object' ? node.type.toLowerCase() : (node.match(/^(.*?):\/\//)?.[1] || '').toLowerCase();
 
                 // 保留过滤规则
                 if (sub.exclude && sub.exclude.trim() !== '') {
@@ -1413,8 +1398,7 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                         });
                         const nameRegex = compileNameRegex(nameRegexParts, msg => console.warn(`[Filter] 订阅「${sub.name || sub.id}」${msg}`));
                         validNodes = validNodes.filter(nodeLink => {
-                            const protocolMatch = nodeLink.match(/^(.*?):\/\//);
-                            const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
+                            const protocol = protocolOf(nodeLink);
                             if (protocolsToKeep.has(protocol)) return true;
                             if (nameRegex) {
                                 // 用 getNodeDisplayName 而不是只看 # 片段，否则 vmess 节点
@@ -1435,8 +1419,7 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                         });
                         const nameRegex = compileNameRegex(nameRegexParts, msg => console.warn(`[Filter] 订阅「${sub.name || sub.id}」${msg}`));
                         validNodes = validNodes.filter(nodeLink => {
-                            const protocolMatch = nodeLink.match(/^(.*?):\/\//);
-                            const protocol = protocolMatch ? protocolMatch[1].toLowerCase() : '';
+                            const protocol = protocolOf(nodeLink);
                             if (protocolsToExclude.has(protocol)) return false;
                             if (nameRegex) {
                                 const nodeName = getNodeDisplayName(nodeLink);
@@ -1449,25 +1432,34 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
 
                 const shouldPrefixSubs = (typeof config.prependSubNameSubs === 'boolean') ? config.prependSubNameSubs : config.prependSubName;
                 const output = (shouldPrefixSubs && sub.name)
-                    ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
-                    : validNodes.join('\n');
+                    ? validNodes.map(node => prependNodeName(node, sub.name))
+                    : validNodes;
                 if (debugCollector) {
                     debugCollector.push({
                         id: sub.id,
                         name: sub.name || '',
                         realtimeFetch: sub.realtimeFetch !== false,
                         usedSource,
-                        inputCount: (text.replace(/\r\n/g, '\n').split('\n').map(l => l.trim()).filter(l => nodeRegex.test(l))).length,
+                        failure,
+                        inputCount,
                         outputCount: validNodes.length
                     });
                 }
                 return output;
-            } catch { return ''; }
+            } catch { return []; }
         })();
     });
     const pieces = await Promise.all(itemTasks);
-    const combinedContent = pieces.join('\n');
-    const uniqueNodesString = [...new Set(combinedContent.split('\n').map(line => line.trim()).filter(line => line))].join('\n');
+    const seen = new Set();
+    const nodes = pieces.flat().filter(node => {
+        const key = typeof node === 'string' ? node.trim() : JSON.stringify(node);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+    if (prependedContent) nodes.unshift(prependedContent);
+    if (acceptClashProxies) return nodes;
+    const uniqueNodesString = nodes.join('\n');
 
     // 确保最终的字符串在非空时以换行符结束，以兼容 subconverter
     let finalNodeList = uniqueNodesString;
@@ -1475,10 +1467,6 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
         finalNodeList += '\n';
     }
 
-    // 将虚假节点（如果存在）插入到列表最前面
-    if (prependedContent) {
-        return `${prependedContent}\n${finalNodeList}`;
-    }
     return finalNodeList;
 }
 
@@ -1676,7 +1664,11 @@ async function handleMisubRequest(context) {
 
     const debugMode = url.searchParams.has('__debug');
     const debugCollector = debugMode ? [] : null;
-    const combinedNodeList = await generateCombinedNodeList(context, config, userAgentHeader, targetMisubs, prependedContentForSubconverter, debugCollector);
+    const directClash = targetFormat === 'clash' && config.useDirectClashMeta;
+    const combinedNodes = await generateCombinedNodeList(context, config, targetMisubs, prependedContentForSubconverter, debugCollector, directClash);
+    const combinedNodeList = Array.isArray(combinedNodes)
+        ? combinedNodes.map(node => typeof node === 'string' ? node : JSON.stringify(node)).join('\n')
+        : combinedNodes;
 
     if (debugMode) {
         // 直接返回純文本，包含調試信息與最終節點列表
@@ -1687,7 +1679,7 @@ async function handleMisubRequest(context) {
         lines.push(`Direct Clash Meta Mode: ${config.useDirectClashMeta ? 'ON' : 'OFF'}`);
         if (debugCollector) {
             debugCollector.forEach(d => {
-                lines.push(`- ${d.name || d.id}: source=${d.usedSource}${d.realtimeFetch ? '(live-on)' : '(live-off)'} input=${d.inputCount} output=${d.outputCount}`);
+                lines.push(`- ${d.name || d.id}: source=${d.usedSource}${d.realtimeFetch ? '(live-on)' : '(live-off)'} input=${d.inputCount} output=${d.outputCount}${d.failure ? ` fallback=${d.failure}` : ''}`);
             });
         }
         lines.push('');
@@ -1702,7 +1694,7 @@ async function handleMisubRequest(context) {
     if (targetFormat === 'clash' && config.useDirectClashMeta) {
         try {
             // 获取节点链接数组
-            const nodeLinks = combinedNodeList.split('\n').filter(l => l.trim());
+            const nodeLinks = Array.isArray(combinedNodes) ? combinedNodes : combinedNodeList.split('\n').filter(l => l.trim());
 
             // 获取模板配置
             let templateConfig = null;
