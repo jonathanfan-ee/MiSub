@@ -113,7 +113,7 @@ test('only assigned, enabled fixed sources are claimed; concurrent polls share o
     assert.equal((await upload(env, bTask, snapshots(), now + 1)).status, 409, 'another collector cannot upload this source');
 });
 
-test('validated snapshots preserve native fields and universal text, schedule 30min, and cannot be replayed', async () => {
+test('validated snapshots preserve native fields and universal text, schedule 5min, and cannot be replayed', async () => {
     const sub = source(), env = await setup([sub]), now = Date.now();
     const before = await db.prepare("SELECT data FROM subscriptions WHERE id = 'main'").first('data');
     const task = (await claim(env, now)).tasks[0];
@@ -121,7 +121,7 @@ test('validated snapshots preserve native fields and universal text, schedule 30
     value.universal.text = Buffer.from(link).toString('base64');
     const result = await upload(env, task, value, now + 10);
     assert.equal(result.status, 200);
-    assert.equal(result.nextAttemptAt, now + 10 + CACHE_TIMING.fresh);
+    assert.equal(result.nextAttemptAt, now + 10 + 300_000);
     const rows = await new D1SourceCacheStore(db).rows(sub.id, await sourceUrlHash(sub.url));
     assert.equal(rows.find(row => row.format === 'clash').payload, native);
     assert.equal(rows.find(row => row.format === 'universal').payload, link);
@@ -138,6 +138,11 @@ test('validated snapshots preserve native fields and universal text, schedule 30
         assert.equal(config.proxies[0]['plugin-opts'].version, 3);
         assert.equal(config.hosts[config.proxies[0].server], '203.0.113.99');
     } finally { globalThis.fetch = originalFetch; }
+    assert.equal((await claim(env, now + 10 + 299_999)).tasks.length, 0,
+        'polls before the five-minute deadline must not pull the source');
+    const due = (await claim(env, now + 10 + 300_000)).tasks;
+    assert.equal(due.length, 1);
+    assert.equal(due[0].sourceId, sub.id, 'the first poll at the deadline can refresh the source');
 });
 
 test('403 pauses collection, failures preserve good snapshots, normal refresh cannot unpause, explicit resume queues work', async () => {

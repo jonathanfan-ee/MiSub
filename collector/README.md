@@ -25,8 +25,10 @@ does not expose a listener. Source URLs are maintained only in MiSub.
   attempts and failures. MiSub control requests do not count as airport requests.
   Corrupt rate state stops requests rather than resetting the budget.
 - A process lock prevents overlapping runs. There are no immediate HTTP retries.
-  Next attempts are scheduled by MiSub: normally 30 minutes after completion,
-  at least five minutes after failure. A 429 Retry-After can extend that delay.
+  Next attempts are scheduled by MiSub: normally five minutes after completion,
+  at least five minutes after failure. The one-minute poll can add up to a minute
+  before a due source starts; sources sharing one collector may be staggered.
+  A 429 Retry-After can extend that delay.
 - HTTP 401/403 or a recognized explicit suspension message pauses the source.
   An administrator must resolve the provider issue and select "恢复采集并排队".
   Normal refresh does not unpause it. Unknown invalid content preserves the last
