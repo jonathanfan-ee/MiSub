@@ -1452,6 +1452,9 @@ async function generateCombinedNodeList(context, config, misubs, prependedConten
     const pieces = await Promise.all(itemTasks);
     const seen = new Set();
     const nodes = pieces.flat().filter(node => {
+        // Native proxies carry subscription-local references and hosts metadata.
+        // Equal public fields do not imply the same endpoint across sources.
+        if (typeof node === 'object') return true;
         const key = typeof node === 'string' ? node.trim() : JSON.stringify(node);
         if (!key || seen.has(key)) return false;
         seen.add(key);
