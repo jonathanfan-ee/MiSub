@@ -1,0 +1,5 @@
+{
+  "misubUrl": "https://misub.example.com",
+  "id": "dmit-us",
+  "secret": "REPLACE_WITH_A_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS"
+}

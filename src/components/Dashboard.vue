@@ -656,6 +656,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
           :total-pages="subsTotalPages"
           :is-sorting="isSortingSubs"
           :source-cache-enabled="config.sourceCacheEnabled"
+          :collectors="config.collectors || []"
           @add="handleAddSubscription"
           @delete="(id) => requestDelete('sub', id)"
           @change-page="changeSubsPage"

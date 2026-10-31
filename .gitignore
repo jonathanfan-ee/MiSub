@@ -13,6 +13,8 @@ dist-ssr
 
 # Dependencies
 /node_modules/
+__pycache__/
+*.pyc
 .wrangler/
 # IDEs and editors
 /.idea

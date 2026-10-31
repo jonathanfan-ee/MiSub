@@ -12,7 +12,15 @@ const FORMATS = ['clash', 'universal'];
 const CURRENT_SOURCE = `EXISTS (SELECT 1 FROM subscriptions, json_each(subscriptions.data) AS source
     WHERE subscriptions.id = 'main' AND json_extract(source.value, '$.id') = ?1
         AND json_extract(source.value, '$.url') = ?11
-        AND json_extract(source.value, '$.fetchPolicy') = 'cache-first')`;
+        AND json_extract(source.value, '$.fetchPolicy') = 'cache-first'
+        AND ((COLLECTOR_PARAM = '' AND COALESCE(json_extract(source.value, '$.refreshVia'), 'pages') != 'collector')
+            OR (COLLECTOR_PARAM != '' AND json_extract(source.value, '$.refreshVia') = 'collector'
+                AND json_extract(source.value, '$.collectorId') = COLLECTOR_PARAM
+                AND json_extract(source.value, '$.enabled') = 1)))`;
+export const isCollectorSource = sub => sub.refreshVia === 'collector';
+export class SnapshotUnavailableError extends Error {
+    constructor() { super('collector-snapshot-unavailable'); }
+}
 const LINK = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy2?|tuic|anytls|socks5):\/\//i;
 export const countUniversalNodes = text => text.split(/\r?\n/).filter(line => LINK.test(line.trim())).length;
 
@@ -34,9 +42,10 @@ export async function sourceUrlHash(url) {
 // The third (lease) row coordinates both formats. Only payload rows hold snapshots.
 // Fencing by token AND URL hash prevents late jobs from replacing a newer refresh.
 export class D1SourceCacheStore {
-    constructor(db, { enforceSourceUrl = false } = {}) {
+    constructor(db, { enforceSourceUrl = false, collectorId = '' } = {}) {
         this.db = db;
         this.enforceSourceUrl = enforceSourceUrl;
+        this.collectorId = collectorId;
     }
 
     async rows(id, hash) {
@@ -49,7 +58,7 @@ export class D1SourceCacheStore {
         const token = crypto.randomUUID();
         const row = await this.db.prepare(`
             INSERT INTO subscription_cache (source_id, format, source_url_hash, last_attempt_at, lock_until, lock_token)
-            SELECT ?1, 'lease', ?2, ?3, ?4, ?5 WHERE (?10 = 0 OR ${CURRENT_SOURCE})
+            SELECT ?1, 'lease', ?2, ?3, ?4, ?5 WHERE (?10 = 0 OR ${CURRENT_SOURCE.replaceAll('COLLECTOR_PARAM', '?12')})
             ON CONFLICT(source_id, format) DO UPDATE SET
                 source_url_hash = excluded.source_url_hash, last_attempt_at = excluded.last_attempt_at,
                 lock_until = excluded.lock_until, lock_token = excluded.lock_token
@@ -58,11 +67,11 @@ export class D1SourceCacheStore {
                  (?6 = 1 OR subscription_cache.last_attempt_at <= ?7))
             RETURNING lock_token
         `).bind(id, hash, now, now + CACHE_TIMING.lock, token, force ? 1 : 0, now - CACHE_TIMING.retry,
-            null, null, this.enforceSourceUrl ? 1 : 0, sourceUrl).first();
+            null, null, this.enforceSourceUrl ? 1 : 0, sourceUrl, this.collectorId).first();
         return row?.lock_token || null;
     }
 
-    async publish(id, hash, token, snapshots, now, sourceUrl = '') {
+    async publish(id, hash, token, snapshots, now, sourceUrl = '', extraStatements = []) {
         const statements = FORMATS.map(format => {
             const snapshot = snapshots[format];
             return this.db.prepare(`
@@ -71,7 +80,7 @@ export class D1SourceCacheStore {
                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
                 WHERE EXISTS (SELECT 1 FROM subscription_cache WHERE source_id = ?1 AND format = 'lease'
                     AND source_url_hash = ?3 AND lock_token = ?10 AND lock_until > ?8)
-                    AND (?12 = 0 OR ${CURRENT_SOURCE})
+                    AND (?12 = 0 OR ${CURRENT_SOURCE.replaceAll('COLLECTOR_PARAM', '?13')})
                 ON CONFLICT(source_id, format) DO UPDATE SET
                     source_url_hash = excluded.source_url_hash,
                     payload = CASE WHEN ?7 IS NOT NULL THEN excluded.payload WHEN subscription_cache.source_url_hash = ?3 THEN subscription_cache.payload ELSE '' END,
@@ -81,12 +90,14 @@ export class D1SourceCacheStore {
                     last_attempt_at = excluded.last_attempt_at, error_code = excluded.error_code
             `).bind(id, format, hash, snapshot.text || '', snapshot.count || 0,
                 snapshot.userInfo ? JSON.stringify(snapshot.userInfo) : null,
-                snapshot.failure ? null : now, now, snapshot.failure || null, token, sourceUrl, this.enforceSourceUrl ? 1 : 0);
+                snapshot.failure ? null : now, now, snapshot.failure || null, token, sourceUrl, this.enforceSourceUrl ? 1 : 0, this.collectorId);
         });
+        statements.push(...extraStatements);
         statements.push(this.db.prepare(`UPDATE subscription_cache SET lock_until = 0, lock_token = NULL, last_attempt_at = ?4
             WHERE source_id = ?1 AND format = 'lease' AND source_url_hash = ?2 AND lock_token = ?3`)
             .bind(id, hash, token, now));
-        await this.db.batch(statements);
+        const results = await this.db.batch(statements);
+        return results.slice(0, 2).every(result => result.meta.changes > 0);
     }
 }
 
@@ -100,6 +111,7 @@ export class SourceCache {
     }
 
     async refresh(sub, { force = false } = {}) {
+        if (isCollectorSource(sub)) throw new SnapshotUnavailableError();
         const hash = await sourceUrlHash(sub.url);
         const token = await this.store.lock(sub.id, hash, this.now(), force, sub.url);
         if (!token) return false;
@@ -122,6 +134,12 @@ export class SourceCache {
         const hash = await sourceUrlHash(sub.url);
         const rows = await this.store.rows(sub.id, hash);
         const cached = rows.find(row => row.format === format && row.payload && row.last_success_at != null);
+        if (isCollectorSource(sub)) {
+            const snapshot = cached || (format === 'clash'
+                ? rows.find(row => row.format === 'universal' && row.payload && row.last_success_at != null) : null);
+            if (!snapshot) throw new SnapshotUnavailableError();
+            return { text: snapshot.payload, usedSource: 'collector-snapshot', failure: snapshot.error_code || null, userInfo: latestUserInfo(rows) };
+        }
         if (cached) {
             if (this.now() - cached.last_success_at >= CACHE_TIMING.fresh) {
                 const refresh = this.refresh(sub).catch(() => { /* D1 outage: retain snapshot, retry on a later access. */ });
@@ -163,10 +181,10 @@ export class SourceCache {
     }
 }
 
-export function createSourceCache(env, config, decode) {
-    if (config.sourceCacheEnabled !== true || config.storageType !== 'd1') return null;
+export function createSourceCache(env, config, decode, { snapshotOnly = false } = {}) {
+    if ((!snapshotOnly && config.sourceCacheEnabled !== true) || config.storageType !== 'd1') return null;
     const db = getBinding(env, 'MISUB_DB');
     return db ? new SourceCache(new D1SourceCacheStore(db, { enforceSourceUrl: true }), { decode }) : null;
 }
 
-export const usesSourceCache = (sub, config) => config.sourceCacheEnabled === true && sub.fetchPolicy === 'cache-first';
+export const usesSourceCache = (sub, config) => isCollectorSource(sub) || (config.sourceCacheEnabled === true && sub.fetchPolicy === 'cache-first');

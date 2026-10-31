@@ -1,6 +1,6 @@
 // FILE: src/composables/useSubscriptions.js
 import { ref, computed, watch } from 'vue';
-import { fetchNodeCount, batchUpdateNodes } from '../lib/api.js';
+import { fetchNodeCount, batchUpdateNodes, sourceErrorMessage } from '../lib/api.js';
 import { useToastStore } from '../stores/toast.js';
 
 export function useSubscriptions(initialSubsRef, markDirty) {
@@ -71,11 +71,11 @@ export function useSubscriptions(initialSubsRef, markDirty) {
 
     try {
       const requestedUrl = subToUpdate.url;
-      const data = await fetchNodeCount(requestedUrl, subToUpdate.id);
+      const data = await fetchNodeCount(requestedUrl, subToUpdate.id, subToUpdate.refreshVia);
       if (subscriptions.value.find(s => s.id === subId)?.url !== requestedUrl) return;
       if (data.cacheStatus) subToUpdate.cacheStatus = data.cacheStatus;
       if (data.success === false) {
-        if (!isInitialLoad) showToast(`${subToUpdate.name || '订阅'} 刷新失败，已保留原缓存：${data.error || '请稍后重试'}`, 'error');
+        if (!isInitialLoad) showToast(`${subToUpdate.name || '订阅'}：${sourceErrorMessage(data.error) || '刷新失败，已保留原缓存'}`, 'error');
         return;
       }
       // 兑现「订阅名称不填将自动获取」：优先用机场声明的名称，
@@ -102,7 +102,8 @@ export function useSubscriptions(initialSubsRef, markDirty) {
       }
 
       if (!isInitialLoad) {
-        showToast(data.error ? `${subToUpdate.name || '订阅'} 部分格式刷新失败：${data.error}` : `${subToUpdate.name || '订阅'} 更新成功！`, data.error ? 'info' : 'success');
+        showToast(data.queued ? '采集任务已排队，通常约一分钟开始执行；冷却中的源会稍后执行'
+          : data.error ? `${subToUpdate.name || '订阅'} 部分格式刷新失败：${data.error}` : `${subToUpdate.name || '订阅'} 更新成功！`, data.error || data.queued ? 'info' : 'success');
         if (!data.serverCacheOnly) markDirty();
       }
     } catch (error) {
@@ -195,7 +196,7 @@ export function useSubscriptions(initialSubsRef, markDirty) {
     targets.forEach(s => { s.isUpdating = true; });
     showToast(`正在刷新 ${targets.length} 个订阅的流量与节点数...`, 'info');
     try {
-      const result = await batchUpdateNodes(targets.map(s => s.id));
+      const result = await batchUpdateNodes(targets.map(s => s.id), targets.filter(s => s.refreshVia === 'collector').map(s => s.id));
       if (result.success) {
         applyBatchResults(result.results);
         markDirty();

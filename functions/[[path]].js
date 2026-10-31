@@ -2,7 +2,8 @@ import yaml from 'js-yaml';
 import { StorageFactory, DataMigrator, STORAGE_TYPES, getBinding } from './storage-adapter.js';
 import { generateClashMetaYAML } from './clash-meta-generator.js';
 import { fetchSubscriptionText, parseClashProxyList } from './subscription-fetch.js';
-import { createSourceCache, usesSourceCache, countUniversalNodes } from './subscription-cache.js';
+import { createSourceCache, usesSourceCache, countUniversalNodes, isCollectorSource, SnapshotUnavailableError, sourceUrlHash } from './subscription-cache.js';
+import { handleCollectorRequest, publicCollectors, collectorRegistry, queueCollectorSource, collectorSourceStatus } from './collector-api.js';
 
 const OLD_KV_KEY = 'misub_data_v1';
 const KV_KEY_SUBS = 'misub_subscriptions_v1';
@@ -405,6 +406,7 @@ async function handleCronTrigger(env) {
     let changesMade = false;
 
     for (const sub of allSubs) {
+        if (isCollectorSource(sub)) continue;
         if (sub.url.startsWith('http') && sub.enabled) {
             try {
                 // --- 並行請求流量和節點內容 ---
@@ -664,6 +666,17 @@ async function checkAndNotify(sub, settings, env) {
 
 // --- 主要 API 請求處理 ---
 async function refreshSourceForAdmin(sub, config, env) {
+    if (isCollectorSource(sub)) {
+        const cache = createSourceCache(env, config, decodeMaybeBase64ToUtf8, { snapshotOnly: true });
+        if (!cache) return { success: false, error: 'cache-requires-d1' };
+        try {
+            const queued = await queueCollectorSource(env, sub);
+            const cacheStatus = await cache.status(sub);
+            cacheStatus.collector = await collectorSourceStatus(env, sub);
+            return { ...queued, cacheStatus, count: cacheStatus.clash.count || cacheStatus.universal.count,
+                userInfo: cacheStatus.clash.userInfo || cacheStatus.universal.userInfo || sub.userInfo || null };
+        } catch { return { success: false, error: 'collector-storage-unavailable' }; }
+    }
     if (usesSourceCache(sub, config)) {
         const cache = createSourceCache(env, config, decodeMaybeBase64ToUtf8);
         if (!cache) return { success: false, error: 'cache-requires-d1' };
@@ -701,6 +714,7 @@ function applyLegacyRefresh(sub, result) {
 async function handleApiRequest(request, env) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api/, '');
+    if (path.startsWith('/collector/')) return handleCollectorRequest(request, env, { decode: decodeMaybeBase64ToUtf8 });
     // [新增] 数据存储迁移接口 (KV -> D1)
     if (path === '/migrate_to_d1') {
         if (!await authMiddleware(request, env)) {
@@ -859,11 +873,15 @@ async function handleApiRequest(request, env) {
                     mytoken: settings.mytoken || 'auto',
                     profileToken: settings.profileToken || 'profiles',
                     sourceCacheEnabled: settings.sourceCacheEnabled === true,
+                    collectors: publicCollectors(env),
                 };
-                const cache = createSourceCache(env, settings, decodeMaybeBase64ToUtf8);
+                const cache = createSourceCache(env, settings, decodeMaybeBase64ToUtf8, { snapshotOnly: misubs.some(isCollectorSource) });
                 await Promise.all(misubs.map(async sub => {
                     if (!usesSourceCache(sub, settings)) return;
-                    try { sub.cacheStatus = cache ? await cache.status(sub) : { error: 'cache-requires-d1' }; }
+                    try {
+                        sub.cacheStatus = cache ? await cache.status(sub) : { error: 'cache-requires-d1' };
+                        if (cache && isCollectorSource(sub)) sub.cacheStatus.collector = await collectorSourceStatus(env, sub);
+                    }
                     catch { sub.cacheStatus = { error: 'cache-storage-unavailable' }; }
                 }));
                 return new Response(JSON.stringify({ misubs, profiles, config }), { headers: { 'Content-Type': 'application/json' } });
@@ -913,6 +931,25 @@ async function handleApiRequest(request, env) {
                 } catch (settingsError) {
                     console.error('[API Error /misubs] 获取设置失败:', settingsError);
                     settings = defaultSettings; // 使用默认设置继续
+                }
+
+                const fixedSources = misubs.filter(isCollectorSource);
+                if (fixedSources.length) {
+                    const registry = collectorRegistry(env), urls = new Set();
+                    for (const sub of misubs) {
+                        if (!/^https?:\/\//.test(sub.url || '')) continue;
+                        if (urls.has(sub.url) && fixedSources.some(item => item.url === sub.url)) {
+                            return Response.json({ success: false, message: '固定出口订阅地址请只保留一份，再供多个订阅组引用' }, { status: 400 });
+                        }
+                        urls.add(sub.url);
+                    }
+                    for (const sub of fixedSources) {
+                        if (settings.storageType !== 'd1' || sub.fetchPolicy !== 'cache-first' || !/^https:\/\//.test(sub.url || '') || !registry[sub.collectorId]) {
+                            return Response.json({ success: false, message: '固定出口源需要 HTTPS 地址、D1 缓存和已登记的采集器' }, { status: 400 });
+                        }
+                    }
+                    try { await getBinding(env, 'MISUB_DB').prepare('SELECT source_id FROM collector_jobs LIMIT 0').all(); }
+                    catch { return Response.json({ success: false, message: '请先审核并执行固定出口任务表迁移' }, { status: 400 }); }
                 }
 
                 // 步骤5: 处理通知。
@@ -968,14 +1005,17 @@ async function handleApiRequest(request, env) {
         case '/node_count': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
             try {
-                const { url: subUrl, id } = await request.json();
+                const { url: subUrl, id, refreshVia } = await request.json();
                 if (typeof subUrl !== 'string' || !/^https?:\/\//.test(subUrl)) {
                     return Response.json({ error: 'Invalid or missing url' }, { status: 400 });
                 }
                 const storage = await getStorageAdapter(env);
                 const settings = { ...defaultSettings, ...await storage.get(KV_KEY_SETTINGS) };
                 const stored = await storage.get(KV_KEY_SUBS);
-                const sub = stored?.find(s => s.url === subUrl && (!id || s.id === id)) || { url: subUrl };
+                if (!Array.isArray(stored)) return Response.json({ success: false, error: 'source-storage-unavailable' }, { status: 503 });
+                const sub = stored?.find(s => s.url === subUrl && isCollectorSource(s))
+                    || stored?.find(s => s.url === subUrl && (!id || s.id === id)) || { url: subUrl };
+                if (refreshVia === 'collector' && !isCollectorSource(sub)) return Response.json({ success: false, error: 'save-collector-source-first' });
                 const result = await refreshSourceForAdmin(sub, settings, env);
                 if (result.success && !result.serverCacheOnly) {
                     const latest = await storage.get(KV_KEY_SUBS);
@@ -992,6 +1032,32 @@ async function handleApiRequest(request, env) {
             }
         }
 
+        case '/collector_refresh': {
+            if (request.method !== 'POST') return Response.json({ error: 'method-not-allowed' }, { status: 405 });
+            try {
+                const { sourceId, resume } = await request.json();
+                const storage = await getStorageAdapter(env);
+                const sub = (await storage.get(KV_KEY_SUBS))?.find(sub => sub.id === sourceId && isCollectorSource(sub));
+                if (!sub) return Response.json({ success: false, error: 'source-not-found' }, { status: 404 });
+                return Response.json(await queueCollectorSource(env, sub, { resume: resume === true }));
+            } catch { return Response.json({ success: false, error: 'collector-storage-unavailable' }, { status: 503 }); }
+        }
+
+        case '/collector_status': {
+            if (request.method !== 'POST') return Response.json({ error: 'method-not-allowed' }, { status: 405 });
+            try {
+                const { sourceId, urlHash } = await request.json();
+                const storage = await getStorageAdapter(env);
+                const sub = (await storage.get(KV_KEY_SUBS))?.find(sub => sub.id === sourceId && isCollectorSource(sub));
+                if (!sub || await sourceUrlHash(sub.url) !== urlHash) return Response.json({ error: 'source-changed' }, { status: 409 });
+                const cache = createSourceCache(env, await storage.get(KV_KEY_SETTINGS) || {}, decodeMaybeBase64ToUtf8, { snapshotOnly: true });
+                if (!cache) throw new SnapshotUnavailableError();
+                const cacheStatus = await cache.status(sub);
+                cacheStatus.collector = await collectorSourceStatus(env, sub);
+                return Response.json({ cacheStatus }, { headers: { 'Cache-Control': 'no-store' } });
+            } catch { return Response.json({ error: 'collector-storage-unavailable' }, { status: 503 }); }
+        }
+
         case '/fetch_external_url': { // New case
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
             let externalUrl;
@@ -1006,6 +1072,18 @@ async function handleApiRequest(request, env) {
             }
 
             try {
+                const storage = await getStorageAdapter(env);
+                const sources = await storage.get(KV_KEY_SUBS);
+                if (!Array.isArray(sources)) return Response.json({ error: 'source-storage-unavailable' }, { status: 503 });
+                const fixed = sources.find(sub => sub.url === externalUrl && isCollectorSource(sub));
+                if (fixed) {
+                    const cache = createSourceCache(env, await storage.get(KV_KEY_SETTINGS) || {}, decodeMaybeBase64ToUtf8, { snapshotOnly: true });
+                    if (!cache) throw new SnapshotUnavailableError();
+                    try {
+                        const { text } = await cache.read(fixed, 'clash');
+                        return new Response(text, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+                    } catch { throw new SnapshotUnavailableError(); }
+                }
                 const response = await Promise.race([
                     fetch(new Request(externalUrl, {
                         headers: { 'User-Agent': 'MiSub-Proxy/1.0' }, // Identify as proxy
@@ -1023,8 +1101,9 @@ async function handleApiRequest(request, env) {
                 return new Response(content, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
 
             } catch (e) {
-                console.error(`[API Error /fetch_external_url] Failed to fetch ${externalUrl}:`, e);
-                return new Response(JSON.stringify({ error: `拉取失败：${e.message}` }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+                if (e instanceof SnapshotUnavailableError) return Response.json({ error: '固定出口快照暂不可读，请稍后重试' }, { status: 503 });
+                console.error('[API Error /fetch_external_url] Request failed');
+                return Response.json({ error: '拉取失败，请检查源地址或稍后重试' }, { status: 502 });
             }
         }
 
@@ -1032,8 +1111,9 @@ async function handleApiRequest(request, env) {
         case '/batch_update_nodes': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
             try {
-                const { subscriptionIds } = await request.json();
+                const { subscriptionIds, collectorSourceIds = [] } = await request.json();
                 if (!Array.isArray(subscriptionIds)) return Response.json({ error: 'subscriptionIds must be an array' }, { status: 400 });
+                if (!Array.isArray(collectorSourceIds)) return Response.json({ error: 'collectorSourceIds must be an array' }, { status: 400 });
                 const storage = await getStorageAdapter(env);
                 const stored = await storage.get(KV_KEY_SUBS);
                 if (!Array.isArray(stored)) {
@@ -1043,6 +1123,7 @@ async function handleApiRequest(request, env) {
                 const targets = stored.filter(sub => subscriptionIds.includes(sub.id) && /^https?:\/\//.test(sub.url));
                 const results = await Promise.all(targets.map(async sub => {
                     try {
+                        if (collectorSourceIds.includes(sub.id) && !isCollectorSource(sub)) return { id: sub.id, success: false, error: 'save-collector-source-first' };
                         const result = await refreshSourceForAdmin(sub, config, env);
                         return { ...result, id: sub.id, nodeCount: result.count, sourceUrl: sub.url };
                     } catch { return { id: sub.id, success: false, error: 'refresh-failed' }; }
@@ -1244,7 +1325,9 @@ async function generateCombinedNodeList(context, config, misubs, prependedConten
                     isUsable: value => (acceptClashProxies && parseClashProxyList(value))
                         || value.split(/\r?\n/).some(line => nodeRegex.test(line.trim())),
                 };
-                const cache = usesSourceCache(sub, config) ? createSourceCache(context.env, config, decodeMaybeBase64ToUtf8) : null;
+                const fixed = isCollectorSource(sub);
+                const cache = usesSourceCache(sub, config) ? createSourceCache(context.env, config, decodeMaybeBase64ToUtf8, { snapshotOnly: fixed }) : null;
+                if (fixed && !cache) throw new SnapshotUnavailableError();
                 let fetched;
                 if (cache) {
                     try {
@@ -1253,7 +1336,7 @@ async function generateCombinedNodeList(context, config, misubs, prependedConten
                         // independent, but allow the existing URI converter as output fallback.
                         if (acceptClashProxies && !fetched.text) fetched = await cache.read(sub, 'universal', context);
                     }
-                    catch { /* Missing migration / D1 outage: preserve legacy availability. */ }
+                    catch { if (fixed) throw new SnapshotUnavailableError(); /* Other sources retain legacy fallback. */ }
                 }
                 const loaded = fetched || await fetchSubscriptionText(sub, fetchOptions);
                 // Request-local only: quota display must follow refreshed snapshot metadata.
@@ -1330,7 +1413,10 @@ async function generateCombinedNodeList(context, config, misubs, prependedConten
                     });
                 }
                 return output;
-            } catch { return []; }
+            } catch (error) {
+                if (error instanceof SnapshotUnavailableError) throw error;
+                return [];
+            }
         })();
     });
     const pieces = await Promise.all(itemTasks);
@@ -1375,6 +1461,9 @@ async function handleMisubRequest(context) {
     const allProfiles = profilesData || [];
     // 關鍵：我們在這裡定義了 `config`，後續都應該使用它
     const config = { ...defaultSettings, ...settings };
+    if (!Array.isArray(misubsData) || !Array.isArray(profilesData)) {
+        return subscriptionErrorResponse(request, 503, '订阅数据暂不可读', '请保留客户端现有配置，稍后重试订阅更新。');
+    }
 
     let token = '';
     let profileIdentifier = null;
@@ -1525,7 +1614,12 @@ async function handleMisubRequest(context) {
     const debugMode = url.searchParams.has('__debug');
     const debugCollector = debugMode ? [] : null;
     const directClash = targetFormat === 'clash' && config.useDirectClashMeta;
-    let combinedNodes = await generateCombinedNodeList(context, config, targetMisubs, '', debugCollector, directClash);
+    let combinedNodes;
+    try { combinedNodes = await generateCombinedNodeList(context, config, targetMisubs, '', debugCollector, directClash); }
+    catch (error) {
+        if (error instanceof SnapshotUnavailableError) return subscriptionErrorResponse(request, 503, '固定出口快照暂不可用', '请保留客户端现有配置，等待采集器取得有效快照后再更新订阅。');
+        throw error;
+    }
     let prependedContentForSubconverter = '';
 
     if (isProfileExpired) { // Use the flag set earlier

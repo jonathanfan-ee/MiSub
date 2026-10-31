@@ -204,10 +204,11 @@ watch(() => props.show, (newValue) => {
         <div class="border-t border-gray-200 dark:border-gray-700 pt-4 space-y-2">
           <label class="flex items-center gap-3 text-sm font-medium text-gray-700 dark:text-gray-200">
             <input type="checkbox" v-model="settings.sourceCacheEnabled" :disabled="settings.storageType !== 'd1'">
-            启用机场缓存优先功能（本站）
+            启用缓存优先与固定出口自动采集（本站）
           </label>
           <p class="text-xs text-gray-500 dark:text-gray-400">默认关闭。需要 D1 及缓存表迁移；开启后还需在指定机场卡片选择“缓存优先”。其他源保持原策略。</p>
-          <p class="text-xs text-gray-500 dark:text-gray-400">30 分钟有效；过期后先返回快照，由下次订阅访问触发后台刷新；失败至少间隔 5 分钟重试。超过 24 小时显示提醒，保留上次成功内容。</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400">普通缓存优先：30 分钟后由订阅访问触发后台刷新。固定出口：由指定采集器每 30 分钟采集，客户端只读快照；关闭此开关会停止自动采集，手动刷新仍可排队。失败至少间隔 5 分钟重试，超过 24 小时提醒。</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400">固定出口需先登记采集器，完成后即可在机场卡片选择。</p>
         </div>
 
         <div class="border-t border-gray-200 dark:border-gray-700 pt-4">

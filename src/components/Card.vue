@@ -1,11 +1,13 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import Modal from './Modal.vue';
 import { copyText } from '../lib/utils.js';
 import { useToastStore } from '../stores/toast.js';
+import { collectorRequest } from '../lib/api.js';
 
 const props = defineProps({
   sourceCacheEnabled: Boolean,
+  collectors: { type: Array, default: () => [] },
   misub: {
     type: Object,
     required: true
@@ -15,16 +17,18 @@ const props = defineProps({
 const emit = defineEmits(['delete', 'change', 'update', 'edit']);
 
 const fetchMode = computed({
-  get: () => props.misub.fetchPolicy === 'cache-first' ? 'cache-first' : (props.misub.realtimeFetch === false ? 'cache-only' : 'realtime'),
+  get: () => props.misub.refreshVia === 'collector' ? 'collector' : props.misub.fetchPolicy === 'cache-first' ? 'cache-first' : (props.misub.realtimeFetch === false ? 'cache-only' : 'realtime'),
   set: value => {
-    props.misub.fetchPolicy = value === 'cache-first' ? 'cache-first' : 'legacy';
-    props.misub.realtimeFetch = value !== 'cache-only';
+    props.misub.refreshVia = value === 'collector' ? 'collector' : 'pages';
+    if (value === 'collector' && !props.misub.collectorId) props.misub.collectorId = props.collectors[0]?.id || '';
+    props.misub.fetchPolicy = ['cache-first', 'collector'].includes(value) ? 'cache-first' : 'legacy';
+    props.misub.realtimeFetch = !['cache-only', 'collector'].includes(value);
     emit('change');
   },
 });
 const cacheFormats = computed(() => ['clash', 'universal'].map(format => ({ format, ...props.misub.cacheStatus?.[format] })));
 const formatAge = ms => ms == null ? '无快照' : ms < 60_000 ? '不足 1 分钟' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)} 分钟` : `${Math.floor(ms / 3_600_000)} 小时`;
-const activeSnapshot = computed(() => props.sourceCacheEnabled && props.misub.fetchPolicy === 'cache-first'
+const activeSnapshot = computed(() => (props.misub.refreshVia === 'collector' || props.sourceCacheEnabled) && props.misub.fetchPolicy === 'cache-first'
   ? props.misub.cacheStatus : null);
 const displayNodeCount = computed(() => activeSnapshot.value?.clash?.lastSuccessAt
   ? activeSnapshot.value.clash.count : activeSnapshot.value?.universal?.lastSuccessAt
@@ -147,6 +151,32 @@ const cachedLinesCount = computed(() => {
 });
 
 const { showToast } = useToastStore();
+const isResuming = ref(false);
+let statusTimer;
+const stopStatusTimer = () => { if (statusTimer) clearInterval(statusTimer); statusTimer = null; };
+async function refreshCollectorStatus() {
+  const sourceId = props.misub.id, sourceUrl = props.misub.url;
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sourceUrl));
+    const urlHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    const result = await collectorRequest('collector_status', { sourceId, urlHash });
+    if (props.misub.id === sourceId && props.misub.url === sourceUrl) props.misub.cacheStatus = result.cacheStatus;
+  } catch { /* Keep the last visible status; no upstream fetch or cache mutation. */ }
+}
+watch(() => props.misub.refreshVia === 'collector' && (props.misub.cacheStatus?.collector?.queued || props.misub.cacheStatus?.collector?.refreshing), pending => {
+  stopStatusTimer();
+  if (pending) statusTimer = setInterval(refreshCollectorStatus, 15000);
+}, { immediate: true });
+onUnmounted(stopStatusTimer);
+async function resumeCollection() {
+  isResuming.value = true;
+  try {
+    await collectorRequest('collector_refresh', { sourceId: props.misub.id, resume: true });
+    await refreshCollectorStatus();
+    showToast('采集已恢复并排队；请确认上游已解除限制', 'info');
+  } catch (error) { showToast(error.message, 'error'); }
+  finally { isResuming.value = false; }
+}
 
 const copyCache = async () => {
   // 之前 catch 里什么都不做：复制失败（非 https 环境下 navigator.clipboard 不存在）
@@ -198,9 +228,27 @@ const copyCache = async () => {
         <span v-if="misub.cachedAt" class="text-gray-400">· {{ new Date(misub.cachedAt).toLocaleString() }}</span>
       </div>
       <div v-if="misub.fetchPolicy === 'cache-first'" class="text-xs space-y-1 text-gray-500 dark:text-gray-400">
-        <p v-if="!sourceCacheEnabled">缓存优先未启用，当前使用原实时策略</p>
+        <template v-if="misub.refreshVia === 'collector'">
+          <p>固定出口：{{ misub.collectorId || '尚未选择' }} · 只读快照</p>
+          <p v-if="!sourceCacheEnabled">自动采集已关闭，保留现有快照；手动刷新可排队</p>
+          <p v-if="misub.cacheStatus?.collector?.paused" class="text-amber-600">
+            上游拒绝请求，采集已暂停。
+            <button @click="resumeCollection" :disabled="isResuming" class="underline">恢复采集并排队</button>
+          </p>
+          <p v-else-if="misub.cacheStatus?.collector?.refreshing">正在采集，继续提供上次成功快照</p>
+          <p v-else-if="misub.cacheStatus?.collector?.queued">已排队，等待采集器领取或冷却结束</p>
+          <p v-else-if="misub.cacheStatus?.collector?.nextAttemptAt">下次最早采集：{{ new Date(misub.cacheStatus.collector.nextAttemptAt).toLocaleString() }}</p>
+          <label class="flex items-center gap-2">采集器
+            <select v-model="misub.collectorId" @change="emit('change')" aria-label="固定出口采集器" class="bg-gray-100 dark:bg-gray-800 rounded p-1">
+              <option v-for="collector in collectors" :key="collector.id" :value="collector.id">{{ collector.id }} · {{ collector.expectedIpv4 }}</option>
+            </select>
+          </label>
+          <p>更改后请先保存，再提交采集任务。</p>
+        </template>
+        <p v-else-if="!sourceCacheEnabled">缓存优先未启用，当前使用原拉取策略</p>
         <p v-else-if="misub.cacheStatus?.error" class="text-amber-600">缓存不可用：{{ misub.cacheStatus.error }}</p>
-        <template v-else>
+        <p v-if="misub.refreshVia === 'collector' && misub.cacheStatus?.error" class="text-amber-600">快照暂不可读：{{ misub.cacheStatus.error }}</p>
+        <template v-if="activeSnapshot && !misub.cacheStatus?.error">
           <p v-for="status in cacheFormats" :key="status.format" :class="status.warning || status.error ? 'text-amber-600' : ''">
             {{ status.format === 'clash' ? 'Clash' : '通用链接' }}：{{ status.count || 0 }} 节点 · {{ formatAge(status.ageMs) }}
             <span v-if="status.lastSuccessAt"> · 成功于 {{ new Date(status.lastSuccessAt).toLocaleString() }}</span>
@@ -229,6 +277,7 @@ const copyCache = async () => {
               <option value="realtime">实时拉取</option>
               <option value="cache-only">仅旧缓存</option>
               <option value="cache-first" :disabled="!sourceCacheEnabled">缓存优先</option>
+              <option value="collector" :disabled="!collectors.length">固定出口</option>
             </select>
           </div>
           <span v-if="expiryInfo" class="text-xs font-medium" :class="expiryInfo.style">{{ expiryInfo.daysRemaining }}</span>

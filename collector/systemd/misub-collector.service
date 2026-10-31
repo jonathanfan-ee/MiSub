@@ -1,0 +1,25 @@
+[Unit]
+Description=MiSub fixed IPv4 subscription collector
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=misub-collector
+Group=misub-collector
+ExecStart=/usr/bin/python3 -B /opt/misub-collector/misub_collector.py
+StateDirectory=misub-collector
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=40
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
