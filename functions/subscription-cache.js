@@ -16,6 +16,16 @@ const CURRENT_SOURCE = `EXISTS (SELECT 1 FROM subscriptions, json_each(subscript
 const LINK = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy2?|tuic|anytls|socks5):\/\//i;
 export const countUniversalNodes = text => text.split(/\r?\n/).filter(line => LINK.test(line.trim())).length;
 
+function latestUserInfo(rows) {
+    for (const row of [...rows].sort((a, b) => (b.last_success_at || 0) - (a.last_success_at || 0))) {
+        try {
+            const info = JSON.parse(row.user_info || 'null');
+            if (info && typeof info === 'object' && Object.keys(info).length) return info;
+        } catch { /* A malformed metadata field must not discard usable nodes. */ }
+    }
+    return null;
+}
+
 export async function sourceUrlHash(url) {
     const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url));
     return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -118,7 +128,7 @@ export class SourceCache {
                 if (context?.waitUntil) context.waitUntil(refresh);
                 else await refresh;
             }
-            return { text: cached.payload, usedSource: 'cache-first', failure: cached.error_code || null };
+            return { text: cached.payload, usedSource: 'cache-first', failure: cached.error_code || null, userInfo: latestUserInfo(rows) };
         }
         // Cold reads wait for the first snapshot. Other readers share the source lease.
         const started = await this.refresh(sub);
@@ -127,7 +137,7 @@ export class SourceCache {
             const current = await this.store.rows(sub.id, hash);
             const snapshot = current.find(row => row.format === format);
             if (snapshot?.payload && snapshot.last_success_at != null) {
-                return { text: snapshot.payload, usedSource: 'cache-first', failure: snapshot.error_code || null };
+                return { text: snapshot.payload, usedSource: 'cache-first', failure: snapshot.error_code || null, userInfo: latestUserInfo(current) };
             }
             const lease = current.find(row => row.format === 'lease');
             if (started || !lease?.lock_token || lease.lock_until <= this.now()) {

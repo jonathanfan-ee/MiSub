@@ -157,9 +157,9 @@ test('concurrent cold requests share a source refresh', async () => {
     assert.ok(results.every(result => result.text === native));
 });
 
-async function setupRoute({ flag = true, profile = {}, url = 'https://route.example/sub' } = {}) {
+async function setupRoute({ flag = true, profile = {}, url = 'https://route.example/sub', showTrafficRemainingNode = false } = {}) {
     const settings = { storageType: 'd1', sourceCacheEnabled: flag, useDirectClashMeta: true,
-        profileToken: 'test-token', showTrafficRemainingNode: false };
+        profileToken: 'test-token', showTrafficRemainingNode };
     const sub = { ...source('route'), name: 'Airport', url };
     await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('main', ?1)").bind(JSON.stringify(settings)).run();
     await db.prepare("INSERT OR REPLACE INTO subscriptions (id, data) VALUES ('main', ?1)").bind(JSON.stringify([sub])).run();
@@ -200,6 +200,31 @@ test('a request holding an obsolete source configuration cannot acquire a new le
     await cache.store.publish('route', oldHash, token, snapshots, 10_001, oldSub.url);
     assert.ok(!(await cache.store.rows('route', oldHash)).some(row => row.payload));
     assert.equal(await cache.store.lock('route', oldHash, 20_000, true, oldSub.url), null);
+});
+
+test('cold and warm aggregate traffic nodes use snapshot metadata without persisting it into the subscriptions list', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+        for (const legacyInfo of [null, { total: 1024, upload: 0, download: 0 }]) {
+            const env = await setupRoute({ url: `https://quota-${legacyInfo ? 'old' : 'missing'}.example/sub`, showTrafficRemainingNode: true });
+            const stored = JSON.parse(await db.prepare("SELECT data FROM subscriptions WHERE id = 'main'").first('data'));
+            stored[0].userInfo = legacyInfo;
+            await db.prepare("UPDATE subscriptions SET data = ?1 WHERE id = 'main'").bind(JSON.stringify(stored)).run();
+            const before = await db.prepare("SELECT data FROM subscriptions WHERE id = 'main'").first('data');
+            globalThis.fetch = async request => {
+                const response = await goodFetch(request);
+                response.headers.set('subscription-userinfo', 'total=8192; upload=0; download=1024');
+                return response;
+            };
+            for (let i = 0; i < 2; i++) {
+                const config = yaml.load(await (await route(env)).text());
+                assert.equal(config.proxies[0].name, '流量剩余 ≫ 7 KB');
+                assert.equal(config.proxies.length, 2);
+                globalThis.fetch = () => assert.fail('warm quota reads should not refresh upstream');
+            }
+            assert.equal(await db.prepare("SELECT data FROM subscriptions WHERE id = 'main'").first('data'), before);
+        }
+    } finally { globalThis.fetch = originalFetch; }
 });
 
 test('disabled, expired and invalid profile tokens never read the source cache or fetch the source', async () => {

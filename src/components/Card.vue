@@ -29,7 +29,9 @@ const activeSnapshot = computed(() => props.sourceCacheEnabled && props.misub.fe
 const displayNodeCount = computed(() => activeSnapshot.value?.clash?.lastSuccessAt
   ? activeSnapshot.value.clash.count : activeSnapshot.value?.universal?.lastSuccessAt
     ? activeSnapshot.value.universal.count : props.misub.nodeCount);
-const effectiveUserInfo = computed(() => activeSnapshot.value?.clash?.userInfo || activeSnapshot.value?.universal?.userInfo || props.misub.userInfo);
+const effectiveUserInfo = computed(() => (activeSnapshot.value
+  ? [...cacheFormats.value].sort((a, b) => (b.lastSuccessAt || 0) - (a.lastSuccessAt || 0)).find(status => status.userInfo)?.userInfo
+  : null) || props.misub.userInfo);
 
 const getProtocol = (url) => {
   try {

@@ -1255,7 +1255,10 @@ async function generateCombinedNodeList(context, config, misubs, prependedConten
                     }
                     catch { /* Missing migration / D1 outage: preserve legacy availability. */ }
                 }
-                const { text, usedSource, failure } = fetched || await fetchSubscriptionText(sub, fetchOptions);
+                const loaded = fetched || await fetchSubscriptionText(sub, fetchOptions);
+                // Request-local only: quota display must follow refreshed snapshot metadata.
+                if (fetched?.userInfo) sub.userInfo = fetched.userInfo;
+                const { text, usedSource, failure } = loaded;
                 let validNodes = (acceptClashProxies && parseClashProxyList(text)) || text.replace(/\r\n/g, '\n').split('\n')
                     .map(line => line.trim()).filter(line => nodeRegex.test(line));
                 const inputCount = validNodes.length;
@@ -1519,6 +1522,10 @@ async function handleMisubRequest(context) {
         context.waitUntil(sendTgNotification(config, message));
     }
 
+    const debugMode = url.searchParams.has('__debug');
+    const debugCollector = debugMode ? [] : null;
+    const directClash = targetFormat === 'clash' && config.useDirectClashMeta;
+    let combinedNodes = await generateCombinedNodeList(context, config, targetMisubs, '', debugCollector, directClash);
     let prependedContentForSubconverter = '';
 
     if (isProfileExpired) { // Use the flag set earlier
@@ -1546,10 +1553,10 @@ async function handleMisubRequest(context) {
         }
     }
 
-    const debugMode = url.searchParams.has('__debug');
-    const debugCollector = debugMode ? [] : null;
-    const directClash = targetFormat === 'clash' && config.useDirectClashMeta;
-    const combinedNodes = await generateCombinedNodeList(context, config, targetMisubs, prependedContentForSubconverter, debugCollector, directClash);
+    if (prependedContentForSubconverter) {
+        combinedNodes = Array.isArray(combinedNodes) ? [prependedContentForSubconverter, ...combinedNodes]
+            : prependedContentForSubconverter + '\n' + combinedNodes;
+    }
     const combinedNodeList = Array.isArray(combinedNodes)
         ? combinedNodes.map(node => typeof node === 'string' ? node : JSON.stringify(node)).join('\n')
         : combinedNodes;
