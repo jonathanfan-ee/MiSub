@@ -3,6 +3,8 @@
 // cannot consume. Keep this consistent with the node-count/cache updater.
 export const SUBSCRIPTION_USER_AGENT = 'MiSub-Node-Counter/2.0';
 export const CLASH_PROXY_HOSTS = Symbol('clash-proxy-hosts');
+export const CLASH_PROXY_SOURCE = Symbol('clash-proxy-source');
+export const CLASH_PROXY_ORIGINAL_NAME = Symbol('clash-proxy-original-name');
 
 // Import only individual proxies. Airport DNS, rules and policy groups must not
 // replace the administrator's aggregation template.
@@ -17,7 +19,10 @@ export function parseClashProxyList(text) {
         // answers and supply the actual endpoints through hosts aliases. Retain
         // only mappings needed by these proxies, including alias chains.
         const hosts = config.hosts && typeof config.hosts === 'object' ? config.hosts : {};
+        const source = {};
         for (const proxy of proxies) {
+            proxy[CLASH_PROXY_SOURCE] = source;
+            proxy[CLASH_PROXY_ORIGINAL_NAME] = proxy.name;
             const required = {};
             const pending = [proxy.server];
             const seen = new Set();

@@ -41,13 +41,15 @@ test('Clash requests retain two negotiated airport subscriptions through the ful
         assert.equal(response.status, 200);
         const config = yaml.load(await response.text());
         assert.equal(config.proxies.length, 2);
-        assert.deepEqual(config.proxies.map(p => [p.type, p.server]), [['ss', 'edge.example'], ['trojan', 'trojan.example']]);
+        assert.deepEqual(config.proxies.map(p => p.type), ['ss', 'trojan']);
+        assert.equal(config.proxies[1].server, 'trojan.example');
+        assert.equal(config.hosts[config.proxies[0].server], '203.0.113.10');
         assert.equal(config.proxies[0].cipher, 'aes-128-gcm');
         assert.equal(config.proxies[0].plugin, 'shadow-tls');
         assert.deepEqual(config.proxies[0]['plugin-opts'], shadowTls['plugin-opts']);
         assert.equal(config.proxies[0].name, 'Airport SS - HK');
         assert.ok(!config.dns.nameserver.includes('https://airport-only.example/dns-query'));
-        assert.deepEqual(config.hosts, { 'ss.example': 'edge.example', 'edge.example': '203.0.113.10' });
+        assert.equal(Object.keys(config.hosts).length, 1);
         assert.notDeepEqual(config.rules, ['MATCH,REJECT']);
         assert.equal(config.proxies[1].sni, 'tls.example');
         assert.equal(config.proxies[1].password, 'test-password');

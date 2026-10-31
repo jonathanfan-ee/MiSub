@@ -4,7 +4,7 @@
  */
 
 import yaml from 'js-yaml';
-import { CLASH_PROXY_HOSTS } from './subscription-fetch.js';
+import { CLASH_PROXY_HOSTS, CLASH_PROXY_SOURCE, CLASH_PROXY_ORIGINAL_NAME } from './subscription-fetch.js';
 
 // mihomo 的保留名称：节点名不能和它们冲突，否则代理组引用会指向错误的目标
 const RESERVED_PROXY_NAMES = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'GLOBAL', 'COMPATIBLE']);
@@ -72,6 +72,9 @@ export async function convertLinksToClashProxies(nodeLinks, options = {}) {
     const proxies = [];
     const skipped = [];
     const hosts = {};
+    const sourceNames = new Map();
+    const references = [];
+    const unnamedSource = {};
     // 只用一个「已占用名称」集合。
     // 之前用 name -> count 的写法会自己造出重名：例如输入 A、A、A [2] 时，
     // 第二个 A 被改成 "A [2]"，和后面真实存在的 "A [2]" 撞车，而 mihomo 会
@@ -123,6 +126,15 @@ export async function convertLinksToClashProxies(nodeLinks, options = {}) {
                     if (visited.has(alias)) break;
                     proxy.server = alias;
                 }
+                const addresses = effectiveHosts[proxy.server];
+                if (addresses && !Object.hasOwn(options.hosts || {}, proxy.server)
+                    && (Array.isArray(addresses) || (typeof addresses === 'string' && /:|^\d+(?:\.\d+){3}$/.test(addresses)))) {
+                    const bytes = new TextEncoder().encode(JSON.stringify([proxy.server, addresses]));
+                    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+                    const key = Array.from(digest.slice(0, 12), byte => byte.toString(16).padStart(2, '0')).join('');
+                    proxy.server = `misub-${key}.invalid`;
+                    hosts[proxy.server] = addresses;
+                }
                 if (proxy.server !== originalServer) {
                     if (['trojan', 'hysteria', 'hysteria2', 'tuic', 'anytls'].includes(proxy.type) && !proxy.sni) proxy.sni = originalServer;
                     if (['vmess', 'vless'].includes(proxy.type) && proxy.tls && !proxy.servername) proxy.servername = originalServer;
@@ -146,14 +158,40 @@ export async function convertLinksToClashProxies(nodeLinks, options = {}) {
             proxy.name = candidate;
 
             proxies.push(proxy);
-            if (nativeProxy?.[CLASH_PROXY_HOSTS]) Object.assign(hosts, nativeProxy[CLASH_PROXY_HOSTS]);
+            if (nativeProxy) {
+                const source = nativeProxy[CLASH_PROXY_SOURCE] || unnamedSource;
+                if (!sourceNames.has(source)) sourceNames.set(source, new Map());
+                const names = sourceNames.get(source);
+                const originalName = nativeProxy[CLASH_PROXY_ORIGINAL_NAME] || nativeProxy.name;
+                if (!names.has(originalName)) names.set(originalName, proxy.name);
+                if (proxy['dialer-proxy']) references.push({ proxy, source, target: proxy['dialer-proxy'] });
+            }
         } catch (error) {
             skipped.push({ link: trimmed.substring(0, 60), reason: error.message });
             console.error(`Failed to parse proxy link: ${trimmed.substring(0, 50)}...`, error);
         }
     }
 
-    return { proxies, skipped, hosts };
+    const invalid = new Set();
+    const externalTargets = new Set([...(options.groupNames || []), ...RESERVED_PROXY_NAMES]);
+    for (const { proxy, source, target } of references) {
+        const resolved = sourceNames.get(source).get(target);
+        if (resolved) proxy['dialer-proxy'] = resolved;
+        else if (!externalTargets.has(target)) invalid.add(proxy);
+    }
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const validNames = new Set(proxies.filter(proxy => !invalid.has(proxy)).map(proxy => proxy.name));
+        for (const { proxy } of references) {
+            if (!invalid.has(proxy) && !validNames.has(proxy['dialer-proxy']) && !externalTargets.has(proxy['dialer-proxy'])) {
+                invalid.add(proxy);
+                changed = true;
+            }
+        }
+    }
+    for (const proxy of invalid) skipped.push({ link: proxy.name, reason: '原生节点引用了未导入或已过滤的上游节点/代理组' });
+    return { proxies: proxies.filter(proxy => !invalid.has(proxy)), skipped, hosts };
 }
 
 /**
