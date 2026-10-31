@@ -11,6 +11,10 @@ claims at most one assigned source, negotiates native Clash YAML and universal
 URI text, then posts both results to the existing Pages site over HTTPS. The VM
 does not expose a listener. Source URLs are maintained only in MiSub.
 
+Clash YAML uses `ClashMeta/1.19.32` for format negotiation; universal URI text
+uses `SubscriptionFetcher/1.0`. These requests need different User-Agent values:
+a browser identity can cause providers to return an HTML page instead of nodes.
+
 - Only direct IPv4 TLS is used, for both MiSub and upstream. Proxy environment
   variables are ignored. Public IPv4 addresses are resolved once and pinned for
   the connection; the original hostname remains the TLS verification identity.

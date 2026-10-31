@@ -1,7 +1,7 @@
 // Fetch a universal share-link subscription, independently of the consuming client.
 // Forwarding a Clash UA makes many providers return YAML, which the link pipeline
 // cannot consume. Keep this consistent with the node-count/cache updater.
-export const SUBSCRIPTION_USER_AGENT = 'MiSub-Node-Counter/2.0';
+export const SUBSCRIPTION_USER_AGENT = 'SubscriptionFetcher/1.0';
 export const CLASH_PROXY_HOSTS = Symbol('clash-proxy-hosts');
 export const CLASH_PROXY_SOURCE = Symbol('clash-proxy-source');
 export const CLASH_PROXY_ORIGINAL_NAME = Symbol('clash-proxy-original-name');

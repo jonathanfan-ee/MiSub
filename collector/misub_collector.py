@@ -22,7 +22,7 @@ from urllib.parse import urljoin, urlsplit
 import uuid
 
 MAX_BYTES = 512 * 1024
-UA = {"clash": "ClashMeta/1.19.32", "universal": "MiSub-Node-Counter/2.0"}
+UA = {"clash": "ClashMeta/1.19.32", "universal": "SubscriptionFetcher/1.0"}
 
 
 class CollectorError(Exception):
