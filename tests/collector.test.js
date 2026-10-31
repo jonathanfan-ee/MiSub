@@ -45,7 +45,7 @@ async function setup(sources = [source()], settings = {}) {
 async function signed(env, path = '/api/collector/tasks', value = {}, { now = Date.now(), id = 'agent-a', nonce = crypto.randomUUID(), ...headers } = {}) {
     const body = JSON.stringify(value), timestamp = String(now);
     const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(JSON.parse(env.MISUB_COLLECTORS)[id]?.secret || secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-    const signature = Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(await collectorSigningText('POST', path, timestamp, nonce, body)))).toString('hex');
+    const signature = Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(await collectorSigningText('POST', path, timestamp, nonce, body, id)))).toString('hex');
     return new Request('https://misub.example' + path, { method: 'POST', body,
         headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': ip, 'X-Collector-Id': id,
             'X-Collector-Timestamp': timestamp, 'X-Collector-Nonce': nonce, 'X-Collector-Signature': signature, ...headers } });
@@ -77,6 +77,12 @@ test('collector authentication binds signature, body, timestamp, nonce and regis
         assert.equal((await call(env, '/api/collector/tasks', {}, headers)).status, 401);
     }
     assert.equal(await db.prepare('SELECT COUNT(*) AS count FROM collector_nonces').first('count'), before);
+    const reusedKeyEnv = { ...env, MISUB_COLLECTORS: JSON.stringify({ 'agent-a': { secret, expectedIpv4: ip }, 'agent-b': { secret, expectedIpv4: ip } }) };
+    const aRequest = await signed(reusedKeyEnv);
+    const changedIdHeaders = new Headers(aRequest.headers);
+    changedIdHeaders.set('X-Collector-Id', 'agent-b');
+    assert.equal((await handleCollectorRequest(new Request(aRequest.url, { method: 'POST', body: '{}', headers: changedIdHeaders }), reusedKeyEnv, { decode })).status, 401,
+        'collector identity remains bound even if an operator reuses a key');
     const request = await signed(env);
     assert.equal((await onRequest({ env, request: request.clone(), waitUntil() {} })).status, 200);
     assert.equal((await onRequest({ env, request, waitUntil() {} })).status, 409);

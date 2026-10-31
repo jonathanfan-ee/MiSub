@@ -232,7 +232,7 @@ def fetch_format(url, format_name, transport, limiter, timeout=10):
 def signing_headers(config, path, body, timestamp=None, nonce=None):
     timestamp = str(timestamp if timestamp is not None else int(time.time() * 1000))
     nonce = nonce or uuid.uuid4().hex
-    canonical = "POST\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hashlib.sha256(body).hexdigest()
+    canonical = "POST\n" + path + "\n" + config["id"] + "\n" + timestamp + "\n" + nonce + "\n" + hashlib.sha256(body).hexdigest()
     signature = hmac.new(config["secret"].encode(), canonical.encode(), hashlib.sha256).hexdigest()
     return {"Content-Type": "application/json", "Accept-Encoding": "identity", "X-Collector-Id": config["id"],
             "X-Collector-Timestamp": timestamp, "X-Collector-Nonce": nonce, "X-Collector-Signature": signature}

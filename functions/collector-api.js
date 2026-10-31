@@ -44,9 +44,9 @@ async function readLimited(request, limit) {
 }
 
 const hex = bytes => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
-export async function collectorSigningText(method, path, timestamp, nonce, body) {
+export async function collectorSigningText(method, path, timestamp, nonce, body, collectorId) {
     const digest = await crypto.subtle.digest('SHA-256', typeof body === 'string' ? encoder.encode(body) : body);
-    return `${method}\n${path}\n${timestamp}\n${nonce}\n${hex(digest)}`;
+    return `${method}\n${path}\n${collectorId}\n${timestamp}\n${nonce}\n${hex(digest)}`;
 }
 async function authenticate(request, env, body, db, now) {
     const id = request.headers.get('X-Collector-Id') || '';
@@ -59,7 +59,7 @@ async function authenticate(request, env, body, db, now) {
         || request.headers.get('CF-Connecting-IP') !== entry.expectedIpv4) throw httpError('unauthorized', 401);
     const key = await crypto.subtle.importKey('raw', encoder.encode(entry.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
     const valid = await crypto.subtle.verify('HMAC', key, Uint8Array.from(signature.match(/../g), byte => parseInt(byte, 16)),
-        encoder.encode(await collectorSigningText(request.method, new URL(request.url).pathname, timestamp, nonce, body)));
+        encoder.encode(await collectorSigningText(request.method, new URL(request.url).pathname, timestamp, nonce, body, id)));
     if (!valid) throw httpError('unauthorized', 401);
     const inserted = await db.prepare('INSERT OR IGNORE INTO collector_nonces (collector_id, nonce, issued_at) VALUES (?1, ?2, ?3)')
         .bind(id, nonce, Number(timestamp)).run();

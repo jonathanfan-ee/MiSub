@@ -108,7 +108,7 @@ Headers: `X-Collector-Id`, `X-Collector-Timestamp` (epoch milliseconds),
 `X-Collector-Nonce`, `X-Collector-Signature` (hex HMAC-SHA256). Sign this UTF-8 text:
 
 ```text
-POST\n<path>\n<timestamp>\n<nonce>\n<hex SHA256 of exact request body>
+POST\n<path>\n<collector-id>\n<timestamp>\n<nonce>\n<hex SHA256 of exact request body>
 ```
 
 Time skew is limited to five minutes. A D1 nonce record rejects replay. Source
